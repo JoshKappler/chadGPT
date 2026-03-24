@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html><head><title>DEBUG</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/three.min.js"></script>
+<script src="/static/GLTFLoader.js"></script>
+</head>
+<body>
+<canvas id="static-overlay"></canvas>
+<div id="scanlines"></div>
+<div id="flicker-overlay"></div>
+<div id="app" class="powered">
+    <div id="header"><div id="title-section"><h1 id="title">DEBUG</h1></div></div>
+    <div id="main">
+        <div id="chat-section"><div id="chat-messages" style="flex:1"></div></div>
+        <div id="avatar-section">
+            <div id="avatar-label">C.H.A.D.</div>
+            <div id="avatar-sublabel">Debug Mode</div>
+            <div id="three-container"></div>
+            <div id="avatar-status">[ LOADING ]</div>
+        </div>
+    </div>
+</div>
+<script>
+// Exact same code as chad3d.js but inline with extra diagnostics
+const container = document.getElementById('three-container');
+const statusEl = document.getElementById('avatar-status');
+const rect = container.getBoundingClientRect();
+const w = Math.max(Math.round(rect.width), 100);
+const h = Math.max(Math.round(rect.height), 100);
+
+statusEl.textContent = '[ container: ' + w + 'x' + h + ' ]';
+console.log('Container:', w, 'x', h, rect);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, w / h, 0.01, 500);
+camera.position.set(0, 0.2, 5.5);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
+renderer.setSize(w, h);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x00ff00, 1); // BRIGHT GREEN to prove canvas is visible
+container.appendChild(renderer.domElement);
+
+// Check computed styles on the canvas
+const canvas = renderer.domElement;
+const cs = getComputedStyle(canvas);
+console.log('Canvas computed style:', cs.width, cs.height, cs.display, cs.visibility, cs.opacity);
+console.log('Canvas attributes:', canvas.width, canvas.height);
+console.log('Canvas offsetWidth/Height:', canvas.offsetWidth, canvas.offsetHeight);
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x004400, 0.8));
+const dl = new THREE.DirectionalLight(0x00ff41, 2.0);
+dl.position.set(-3, 5, 8);
+scene.add(dl);
+
+const group = new THREE.Group();
+scene.add(group);
+
+function animate() {
+    requestAnimationFrame(animate);
+    renderer.render(scene, camera);
+}
+animate();
+
+// After 1 second, check if we can see the green
+setTimeout(() => {
+    statusEl.textContent = '[ GREEN BOX VISIBLE? If not, canvas is hidden by CSS ]';
+}, 1000);
+
+// After 3 seconds, load the model
+setTimeout(() => {
+    renderer.setClearColor(0x050505, 1);
+    const loader = new THREE.GLTFLoader();
+    loader.load('/static/head.glb', (gltf) => {
+        const model = gltf.scene;
+        model.traverse(n => {
+            if (n.isMesh) {
+                n.geometry.computeVertexNormals();
+                n.material = new THREE.MeshPhongMaterial({
+                    color: 0x00aa2a, emissive: 0x003300,
+                    specular: 0x44ff66, shininess: 90, side: THREE.DoubleSide
+                });
+            }
+        });
+        group.add(model);
+        scene.updateMatrixWorld(true);
+
+        // Compute bbox
+        let minX=Infinity,minY=Infinity,minZ=Infinity;
+        let maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
+        const v = new THREE.Vector3();
+        model.traverse(n => {
+            if (n.isMesh && n.geometry.attributes.position) {
+                const pos = n.geometry.attributes.position;
+                for (let i = 0; i < pos.count; i++) {
+                    v.fromBufferAttribute(pos, i).applyMatrix4(n.matrixWorld);
+                    if(v.x<minX)minX=v.x; if(v.y<minY)minY=v.y; if(v.z<minZ)minZ=v.z;
+                    if(v.x>maxX)maxX=v.x; if(v.y>maxY)maxY=v.y; if(v.z>maxZ)maxZ=v.z;
+                }
+            }
+        });
+        const cx=(minX+maxX)/2, cy=(minY+maxY)/2, cz=(minZ+maxZ)/2;
+        const maxDim = Math.max(maxX-minX, maxY-minY, maxZ-minZ);
+        const s = 3.0 / maxDim;
+        model.position.set(-cx, -cy + (maxY-minY)*0.05, -cz);
+        group.scale.set(s, s, s);
+        group.rotation.y = 0;
+
+        statusEl.textContent = '[ HEAD LOADED - scale:' + s.toFixed(1) + ' ]';
+    });
+}, 3000);
+</script>
+</body>
+</html>

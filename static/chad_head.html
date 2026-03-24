@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #050505; overflow: hidden; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+<script src="/static/three.min.js"></script>
+<script src="/static/GLTFLoader.js"></script>
+</head>
+<body>
+<script>
+// === ChadGPT 3D Head — iframe renderer ===
+// This page is loaded inside an iframe for total CSS/JS isolation.
+// It is also fully functional as a standalone page for testing.
+
+var scene, camera, renderer, headGroup, canvas;
+var allMeshes = [];
+var mood = 'dormant';
+var modelLoaded = false;
+var wakeRequested = false;
+var initDone = false;
+
+// --- Get usable dimensions, with many fallbacks ---
+function getDimensions() {
+    // Try multiple sources for width/height
+    var w = window.innerWidth
+         || document.documentElement.clientWidth
+         || document.body.clientWidth
+         || 300;
+    var h = window.innerHeight
+         || document.documentElement.clientHeight
+         || document.body.clientHeight
+         || 300;
+    // Never allow 0 — use 300 as absolute minimum
+    if (w < 10) w = 300;
+    if (h < 10) h = 300;
+    return { w: w, h: h };
+}
+
+function tryInit() {
+    if (initDone) return;
+    if (typeof THREE === 'undefined') {
+        setTimeout(tryInit, 100);
+        return;
+    }
+    var dim = getDimensions();
+    doInit(dim.w, dim.h);
+}
+
+function doInit(w, h) {
+    initDone = true;
+    console.log('CHAD3D-IFRAME: init ' + w + 'x' + h);
+
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(40, w / h, 0.01, 500);
+    camera.position.set(0, 0.2, 5.5);
+    camera.lookAt(0, 0, 0);
+
+    renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Start BRIGHT GREEN so it's obvious the canvas exists
+    renderer.setClearColor(0x002200, 1);
+    document.body.appendChild(renderer.domElement);
+    canvas = renderer.domElement;
+
+    // Lighting — strong, from multiple angles
+    scene.add(new THREE.AmbientLight(0x004400, 1.0));
+    var key = new THREE.DirectionalLight(0x00ff41, 2.5);
+    key.position.set(-3, 5, 8);
+    scene.add(key);
+    var fill = new THREE.DirectionalLight(0x00cc33, 1.5);
+    fill.position.set(5, -2, 4);
+    scene.add(fill);
+    var back = new THREE.PointLight(0x00ff41, 1.5, 50);
+    back.position.set(0, 2, -5);
+    scene.add(back);
+
+    headGroup = new THREE.Group();
+    scene.add(headGroup);
+
+    // Render loop
+    (function animate() {
+        requestAnimationFrame(animate);
+        var t = Date.now() * 0.001;
+        if (headGroup) {
+            if (mood !== 'dormant') {
+                headGroup.rotation.y = Math.sin(t * 0.3) * 0.1;
+                headGroup.rotation.x = Math.sin(t * 0.2) * 0.02;
+            } else {
+                headGroup.rotation.y = Math.sin(t * 0.1) * 0.2;
+            }
+            if (mood === 'talking' && allMeshes.length > 0) {
+                var pulse = Math.sin(t * 6) * 0.2 + 0.8;
+                for (var i = 0; i < allMeshes.length; i++) {
+                    allMeshes[i].material.emissive.setRGB(0, 0.05 + pulse * 0.15, 0);
+                    allMeshes[i].material.opacity = 0.75 + pulse * 0.12;
+                }
+                headGroup.rotation.x = Math.sin(t * 8) * 0.01;
+            }
+        }
+        if (renderer && scene && camera) {
+            renderer.render(scene, camera);
+        }
+    })();
+
+    // Resize — multiple triggers
+    function onResize() {
+        var dim = getDimensions();
+        if (dim.w > 10 && dim.h > 10 && renderer && camera) {
+            camera.aspect = dim.w / dim.h;
+            camera.updateProjectionMatrix();
+            renderer.setSize(dim.w, dim.h);
+        }
+    }
+    window.addEventListener('resize', onResize);
+    // Poll several times for flex layout settling
+    setTimeout(onResize, 100);
+    setTimeout(onResize, 300);
+    setTimeout(onResize, 1000);
+    setTimeout(onResize, 3000);
+
+    // Load model
+    console.log('CHAD3D-IFRAME: loading head.glb...');
+    new THREE.GLTFLoader().load('/static/head.glb',
+        function(gltf) {
+            console.log('CHAD3D-IFRAME: GLB loaded');
+            try { setupModel(gltf.scene); }
+            catch(e) { console.error('CHAD3D-IFRAME: setup error', e); }
+        },
+        null,
+        function(err) { console.error('CHAD3D-IFRAME: load error', err); }
+    );
+}
+
+function setupModel(model) {
+    var mat = new THREE.MeshPhongMaterial({
+        color: 0x00aa2a, emissive: 0x004400, specular: 0x44ff66,
+        shininess: 90, transparent: true, opacity: 0.85, side: THREE.DoubleSide
+    });
+
+    model.traverse(function(n) {
+        if (n.isMesh) {
+            n.geometry.computeVertexNormals();
+            n.material = mat.clone();
+            allMeshes.push(n);
+        }
+    });
+    if (allMeshes.length === 0) { console.error('CHAD3D-IFRAME: 0 meshes'); return; }
+    console.log('CHAD3D-IFRAME: ' + allMeshes.length + ' meshes');
+
+    headGroup.add(model);
+    // CRITICAL: Reset headGroup rotation before computing bounding box.
+    // The animation loop has been rotating headGroup since init. The model's
+    // raw center is at z=175 — even a tiny rotation moves it tens of units.
+    // The bbox must be computed at identity rotation so centering is correct.
+    headGroup.rotation.set(0, 0, 0);
+    headGroup.scale.set(1, 1, 1);
+    scene.updateMatrixWorld(true);
+
+    // Bounding box via vertex traversal
+    var minX=Infinity, minY=Infinity, minZ=Infinity;
+    var maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity;
+    var v = new THREE.Vector3();
+    model.traverse(function(n) {
+        if (n.isMesh && n.geometry.attributes.position) {
+            var pos = n.geometry.attributes.position;
+            for (var i = 0; i < pos.count; i++) {
+                v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+                v.applyMatrix4(n.matrixWorld);
+                if (v.x<minX) minX=v.x; if (v.y<minY) minY=v.y; if (v.z<minZ) minZ=v.z;
+                if (v.x>maxX) maxX=v.x; if (v.y>maxY) maxY=v.y; if (v.z>maxZ) maxZ=v.z;
+            }
+        }
+    });
+
+    var cx=(minX+maxX)/2, cy=(minY+maxY)/2, cz=(minZ+maxZ)/2;
+    var maxDim = Math.max(maxX-minX, maxY-minY, maxZ-minZ);
+    console.log('CHAD3D-IFRAME: bbox center', cx.toFixed(1), cy.toFixed(1), cz.toFixed(1), 'maxDim', maxDim.toFixed(4));
+
+    if (!maxDim || maxDim < 0.001 || !isFinite(maxDim)) {
+        console.warn('CHAD3D-IFRAME: using fallback bbox');
+        cx=7.283; cy=-30.308; cz=175.391; maxDim=0.68;
+    }
+
+    var s = 3.0 / maxDim;
+    model.position.set(-cx, -cy, -cz);
+    headGroup.scale.set(s, s, s);
+    headGroup.rotation.y = 0;
+    modelLoaded = true;
+
+    // Switch to dark background now that model is loaded
+    renderer.setClearColor(0x050505, 1);
+
+    console.log('CHAD3D-IFRAME: model ready, scale=' + s.toFixed(2));
+
+    if (wakeRequested) {
+        setOpacity(1);
+        mood = 'annoyed';
+    } else {
+        setOpacity(0.5);
+    }
+
+    // Notify parent
+    try { window.parent.postMessage({type:'chad3d-ready'}, '*'); } catch(e) {}
+}
+
+function setOpacity(f) {
+    f = Math.max(f, 0.1);
+    for (var i = 0; i < allMeshes.length; i++) {
+        allMeshes[i].material.opacity = 0.85 * f;
+        allMeshes[i].material.emissive.setRGB(0, 0.15 * f, 0);
+    }
+}
+
+function doWake() {
+    wakeRequested = true;
+    mood = 'annoyed';
+    if (!modelLoaded) return;
+    var p = 0;
+    (function fadeIn() {
+        p += 0.03;
+        if (p >= 1) { setOpacity(1); return; }
+        setOpacity(p);
+        requestAnimationFrame(fadeIn);
+    })();
+}
+function doSleep() { mood = 'dormant'; wakeRequested = false; setOpacity(0.5); }
+function doStartTalking() { mood = 'talking'; }
+function doStopTalking() { mood = 'annoyed'; }
+
+// Listen for commands from parent page
+window.addEventListener('message', function(e) {
+    if (!e.data || !e.data.cmd) return;
+    switch(e.data.cmd) {
+        case 'wake': doWake(); break;
+        case 'sleep': doSleep(); break;
+        case 'startTalking': doStartTalking(); break;
+        case 'stopTalking': doStopTalking(); break;
+        case 'resize':
+            // Parent tells us our actual size
+            if (e.data.w && e.data.h && renderer && camera) {
+                camera.aspect = e.data.w / e.data.h;
+                camera.updateProjectionMatrix();
+                renderer.setSize(e.data.w, e.data.h);
+            }
+            break;
+    }
+});
+
+// Init: try immediately, retry if THREE not loaded yet
+tryInit();
+// Also try on DOMContentLoaded and load (belt + suspenders)
+document.addEventListener('DOMContentLoaded', tryInit);
+window.addEventListener('load', tryInit);
+</script>
+</body>
+</html>

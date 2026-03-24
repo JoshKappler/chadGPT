@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>HEAD TEST</title>
+    <style>
+        body { margin: 0; background: #000; color: #0f0; font-family: monospace; }
+        #container { width: 600px; height: 600px; border: 2px solid #0f0; margin: 20px auto; }
+        #log { padding: 20px; white-space: pre-wrap; font-size: 12px; max-height: 300px; overflow-y: auto; }
+    </style>
+    <script src="/static/three.min.js"></script>
+    <script src="/static/GLTFLoader.js"></script>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="log"></div>
+    <script>
+        const logEl = document.getElementById('log');
+        function log(msg) {
+            console.log(msg);
+            logEl.textContent += msg + '\n';
+        }
+
+        log('THREE r' + THREE.REVISION);
+        log('GLTFLoader: ' + (typeof THREE.GLTFLoader));
+
+        const container = document.getElementById('container');
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 500);
+        camera.position.set(0, 0, 5.5);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(600, 600);
+        renderer.setClearColor(0x111111, 1);
+        container.appendChild(renderer.domElement);
+
+        // Strong lighting
+        scene.add(new THREE.AmbientLight(0x004400, 1.0));
+        const dl = new THREE.DirectionalLight(0x00ff41, 2.5);
+        dl.position.set(-3, 5, 8);
+        scene.add(dl);
+        const dl2 = new THREE.DirectionalLight(0x00cc33, 1.5);
+        dl2.position.set(5, -2, 4);
+        scene.add(dl2);
+
+        // Test cube at origin - proves rendering works
+        const cube = new THREE.Mesh(
+            new THREE.BoxGeometry(0.5, 0.5, 0.5),
+            new THREE.MeshPhongMaterial({ color: 0xff0000, emissive: 0x440000 })
+        );
+        scene.add(cube);
+        log('Red test cube added at origin');
+
+        // Render loop
+        function animate() {
+            requestAnimationFrame(animate);
+            cube.rotation.y += 0.01;
+            renderer.render(scene, camera);
+        }
+        animate();
+        log('Render loop started');
+
+        // Load GLB
+        const loader = new THREE.GLTFLoader();
+        log('Loading head.glb...');
+
+        loader.load('/static/head.glb',
+            (gltf) => {
+                log('GLB LOADED OK');
+                const model = gltf.scene;
+
+                // Log node hierarchy
+                model.traverse((node) => {
+                    const indent = '  '.repeat(getDepth(node, model));
+                    let info = indent + node.type + ': ' + (node.name || '(unnamed)');
+                    if (node.isMesh) {
+                        const pos = node.geometry.attributes.position;
+                        info += ' [' + (pos ? pos.count : 0) + ' verts]';
+                    }
+                    log(info);
+                });
+
+                // Apply green material
+                model.traverse((node) => {
+                    if (node.isMesh) {
+                        node.geometry.computeVertexNormals();
+                        node.material = new THREE.MeshPhongMaterial({
+                            color: 0x00aa2a,
+                            emissive: 0x003300,
+                            specular: 0x44ff66,
+                            shininess: 90,
+                            side: THREE.DoubleSide,
+                        });
+                    }
+                });
+
+                // Add to scene
+                const group = new THREE.Group();
+                group.add(model);
+                scene.add(group);
+
+                // Update ALL world matrices
+                scene.updateMatrixWorld(true);
+
+                // Check mesh world matrix
+                let meshNode = null;
+                model.traverse((n) => { if (n.isMesh && !meshNode) meshNode = n; });
+
+                if (meshNode) {
+                    const m = meshNode.matrixWorld.elements;
+                    log('Mesh worldMatrix:');
+                    log('  diagonal: ' + m[0].toFixed(6) + ', ' + m[5].toFixed(6) + ', ' + m[10].toFixed(6));
+                    log('  translation: ' + m[12].toFixed(3) + ', ' + m[13].toFixed(3) + ', ' + m[14].toFixed(3));
+
+                    const isIdentity = Math.abs(m[0] - 1) < 0.01 && Math.abs(m[5] - 1) < 0.01;
+                    log('  Identity? ' + isIdentity);
+                }
+
+                // Manual vertex bounding box
+                let minX=Infinity, minY=Infinity, minZ=Infinity;
+                let maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity;
+                const _v = new THREE.Vector3();
+                let vtxCount = 0;
+
+                model.traverse((node) => {
+                    if (node.isMesh && node.geometry.attributes.position) {
+                        const pos = node.geometry.attributes.position;
+                        for (let i = 0; i < pos.count; i++) {
+                            _v.fromBufferAttribute(pos, i);
+                            _v.applyMatrix4(node.matrixWorld);
+                            if (_v.x < minX) minX = _v.x;
+                            if (_v.y < minY) minY = _v.y;
+                            if (_v.z < minZ) minZ = _v.z;
+                            if (_v.x > maxX) maxX = _v.x;
+                            if (_v.y > maxY) maxY = _v.y;
+                            if (_v.z > maxZ) maxZ = _v.z;
+                            vtxCount++;
+                        }
+                    }
+                });
+
+                log('Vertices: ' + vtxCount);
+                log('BBox min: ' + minX.toFixed(3) + ', ' + minY.toFixed(3) + ', ' + minZ.toFixed(3));
+                log('BBox max: ' + maxX.toFixed(3) + ', ' + maxY.toFixed(3) + ', ' + maxZ.toFixed(3));
+
+                const cx = (minX + maxX) / 2;
+                const cy = (minY + maxY) / 2;
+                const cz = (minZ + maxZ) / 2;
+                const sx = maxX - minX;
+                const sy = maxY - minY;
+                const sz = maxZ - minZ;
+                const maxDim = Math.max(sx, sy, sz);
+                log('Center: ' + cx.toFixed(3) + ', ' + cy.toFixed(3) + ', ' + cz.toFixed(3));
+                log('Size: ' + sx.toFixed(3) + ', ' + sy.toFixed(3) + ', ' + sz.toFixed(3));
+                log('MaxDim: ' + maxDim.toFixed(4));
+
+                // Center and scale
+                const targetSize = 3.0;
+                const s = targetSize / maxDim;
+                model.position.set(-cx, -cy, -cz);
+                group.scale.set(s, s, s);
+                group.rotation.y = 0;
+
+                log('Scale: ' + s.toFixed(4));
+                log('Model position: ' + model.position.x.toFixed(2) + ', ' + model.position.y.toFixed(2) + ', ' + model.position.z.toFixed(2));
+
+                // Remove test cube since head should now be visible
+                // scene.remove(cube);
+                log('=== SETUP COMPLETE ===');
+                log('If you see a RED CUBE but no GREEN HEAD, the positioning is wrong.');
+                log('If you see BOTH, everything works.');
+                log('If you see NEITHER, rendering is broken.');
+            },
+            (xhr) => {
+                if (xhr.total > 0) {
+                    log('Loading: ' + Math.round(xhr.loaded / xhr.total * 100) + '%');
+                }
+            },
+            (err) => {
+                log('LOAD ERROR: ' + (err.message || err));
+            }
+        );
+
+        function getDepth(node, root) {
+            let depth = 0;
+            let current = node;
+            while (current.parent && current !== root) {
+                depth++;
+                current = current.parent;
+            }
+            return depth;
+        }
+    </script>
+</body>
+</html>

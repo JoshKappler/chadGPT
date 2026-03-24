@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChadGPT</title>
+    <link rel="stylesheet" href="/static/style.css?v=20">
+    <script src="/static/three.min.js"></script>
+    <script src="/static/GLTFLoader.js"></script>
+</head>
+<body>
+    <canvas id="static-overlay"></canvas>
+    <div id="scanlines"></div>
+    <div id="flicker-overlay"></div>
+
+    <div id="app">
+        <div id="header">
+            <div id="power-section">
+                <div id="lever-container" onclick="togglePower()">
+                    <div id="lever-track">
+                        <div id="lever-label-off">OFF</div>
+                        <div id="lever-label-on">ON</div>
+                        <div id="lever-handle"></div>
+                    </div>
+                </div>
+                <div id="power-indicator"></div>
+            </div>
+            <div id="title-section">
+                <h1 id="title">ChadGPT</h1>
+                <div id="subtitle">v0.6.6.6 — NEURAL ATTITUDE ENGINE</div>
+            </div>
+            <div id="status-section">
+                <span id="status-dot"></span>
+                <span id="status-text">OFFLINE</span>
+                <button id="settings-toggle" onclick="toggleSettings()">CFG</button>
+            </div>
+        </div>
+
+        <div id="main">
+            <div id="chat-section">
+                <div id="boot-terminal">
+                    <div id="boot-progress-bar"><div id="boot-progress-fill"></div></div>
+                    <div id="boot-log"></div>
+                    <span id="boot-cursor">█</span>
+                </div>
+                <div id="chat-messages"></div>
+                <div id="input-area">
+                    <button id="shutup-btn" onclick="shutUp()" disabled>SHUT UP</button>
+                    <div id="input-wrapper">
+                        <textarea id="chat-input" placeholder="Talk to Chad (he won't like it)..." disabled
+                            onkeydown="handleKeyDown(event)"></textarea>
+                        <button id="send-btn" onclick="sendMessage()" disabled>▶</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="avatar-section">
+                <div id="avatar-label">C.H.A.D.</div>
+                <div id="avatar-sublabel">Cognitive Hostile Attitude Device</div>
+                <div id="three-container"></div>
+                <div id="avatar-status">[ DORMANT ]</div>
+            </div>
+        </div>
+
+        <!-- Settings Panel -->
+        <div id="settings-panel">
+            <div id="settings-header">
+                <span>CONFIG</span>
+                <button onclick="toggleSettings()">X</button>
+            </div>
+            <div id="settings-body">
+                <div class="settings-section-label">LLM MODEL</div>
+                <div class="setting-group">
+                    <select id="llm-select"></select>
+                </div>
+                <button class="settings-btn" onclick="switchLLM()">SWITCH MODEL</button>
+                <div id="llm-status" class="settings-status-text"></div>
+
+                <div class="settings-section-label" style="margin-top:16px;">VOICE</div>
+                <div class="setting-group">
+                    <label>TTS ENGINE</label>
+                    <select id="tts-engine">
+                        <option value="qwen3" selected>Qwen3-TTS (Emotional)</option>
+                        <option value="kokoro">Kokoro (Fast/Flat)</option>
+                    </select>
+                </div>
+                <div class="setting-group">
+                    <label>IRRITATION <span id="chaos-val">55%</span></label>
+                    <input type="range" id="voice-chaos" min="0" max="100" step="5" value="55">
+                    <div class="setting-hint">Vocal emotion (0 = bored, 100 = unhinged)</div>
+                </div>
+                <div class="setting-group">
+                    <label>PITCH DEPTH <span id="pitch-val">5</span></label>
+                    <input type="range" id="voice-pitch" min="0" max="10" step="1" value="5">
+                    <div class="setting-hint">Semitones lower (0 = natural, 10 = Darth Vader)</div>
+                </div>
+                <div class="setting-group">
+                    <label>TEMPERATURE <span id="temp-val">0.9</span></label>
+                    <input type="range" id="voice-temp" min="0.3" max="1.2" step="0.05" value="0.9">
+                    <div class="setting-hint">Voice randomness (low = robotic, high = chaotic)</div>
+                </div>
+                <div id="qwen3-advanced">
+                    <div class="setting-group">
+                        <label>SPEAKER</label>
+                        <select id="qwen3-speaker">
+                            <option value="aiden" selected>aiden</option>
+                            <option value="ryan">ryan</option>
+                            <option value="eric">eric</option>
+                            <option value="dylan">dylan</option>
+                            <option value="uncle_fu">uncle_fu</option>
+                        </select>
+                        <div class="setting-hint">Base voice (pitch slider deepens any speaker)</div>
+                    </div>
+                    <div class="setting-group">
+                        <label>CUSTOM INSTRUCT (optional)</label>
+                        <textarea id="custom-instruct" class="parler-textarea" placeholder="Override emotion: e.g. 'Whispering menacingly'"></textarea>
+                        <div class="setting-hint">Leave blank for auto (irritation slider controls mood)</div>
+                    </div>
+                </div>
+                <div id="kokoro-settings" style="display:none;">
+                    <div class="setting-group">
+                        <label>VOICE ID</label>
+                        <select id="voice-select">
+                            <option value="am_michael">am_michael (US)</option>
+                            <option value="am_fenrir">am_fenrir (US)</option>
+                            <option value="am_puck">am_puck (US)</option>
+                            <option value="bm_george">bm_george (UK)</option>
+                            <option value="bm_fable">bm_fable (UK)</option>
+                        </select>
+                    </div>
+                    <div class="setting-group">
+                        <label>SPEED <span id="speed-val">0.95</span></label>
+                        <input type="range" id="voice-speed" min="0.5" max="1.5" step="0.05" value="0.95">
+                    </div>
+                    <div class="setting-group">
+                        <label>LANG CODE</label>
+                        <select id="lang-code">
+                            <option value="a" selected>a (American)</option>
+                            <option value="b">b (British)</option>
+                        </select>
+                    </div>
+                </div>
+                <button class="settings-btn" onclick="applyVoiceSettings()">APPLY VOICE</button>
+                <div id="settings-status" class="settings-status-text"></div>
+
+                <div class="settings-section-label" style="margin-top:16px;">AUDIO</div>
+                <div class="setting-group">
+                    <label>BOOT VOLUME <span id="boot-vol-val">100%</span></label>
+                    <input type="range" id="boot-volume" min="0" max="100" step="5" value="100">
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="dim-overlay"></div>
+
+    <script src="/static/effects.js?v=20"></script>
+    <script src="/static/app.js?v=20"></script>
+
+    <!--
+        3D HEAD: Inline script. No external file. No iframe.
+        Identical approach to test_head.html which WORKS.
+        Model transform values hardcoded from GLB binary analysis.
+        NO bounding box computation. NO animation before model loads.
+    -->
+    <script>
+    var chadAvatar = null;
+    (function() {
+        var container = document.getElementById('three-container');
+        var statusEl = document.getElementById('avatar-status');
+        if (!container || typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') return;
+
+        // --- Measure container ---
+        var rect = container.getBoundingClientRect();
+        var W = Math.max(rect.width | 0, 200);
+        var H = Math.max(rect.height | 0, 200);
+
+        // --- Scene + Camera (same as working test_head.html) ---
+        var scene = new THREE.Scene();
+        var camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 500);
+        camera.position.set(0, 0.2, 5.5);
+        camera.lookAt(0, 0, 0);
+
+        // --- Renderer (alpha:false is critical) ---
+        var renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
+        renderer.setSize(W, H);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setClearColor(0x050505, 1);
+        renderer.domElement.style.display = 'block';
+        renderer.domElement.style.width = '100%';
+        renderer.domElement.style.height = '100%';
+        container.appendChild(renderer.domElement);
+
+        // --- Lights ---
+        scene.add(new THREE.AmbientLight(0x004400, 1.0));
+        var dl1 = new THREE.DirectionalLight(0x00ff41, 2.5);
+        dl1.position.set(-3, 5, 8); scene.add(dl1);
+        var dl2 = new THREE.DirectionalLight(0x00cc33, 1.5);
+        dl2.position.set(5, -2, 4); scene.add(dl2);
+        var pl = new THREE.PointLight(0x00ff41, 1.5, 50);
+        pl.position.set(0, 2, -5); scene.add(pl);
+
+        // --- Group that holds the head (animated) ---
+        var headGroup = new THREE.Group();
+        scene.add(headGroup);
+
+        // --- State ---
+        var allMeshes = [];
+        var mood = 'dormant';
+        var modelLoaded = false;
+        var wakeRequested = false;
+
+        function setOpacity(f) {
+            f = Math.max(f, 0.1);
+            for (var i = 0; i < allMeshes.length; i++) {
+                allMeshes[i].material.opacity = 0.85 * f;
+                allMeshes[i].material.emissive.setRGB(0, 0.15 * f, 0);
+            }
+        }
+
+        // --- Render loop: does NOT touch headGroup until model is loaded ---
+        (function animate() {
+            requestAnimationFrame(animate);
+            if (modelLoaded) {
+                var t = Date.now() * 0.001;
+                if (mood === 'talking') {
+                    headGroup.rotation.y = Math.sin(t * 0.3) * 0.1;
+                    headGroup.rotation.x = Math.sin(t * 0.2) * 0.02;
+                    var pulse = Math.sin(t * 6) * 0.2 + 0.8;
+                    for (var i = 0; i < allMeshes.length; i++) {
+                        allMeshes[i].material.emissive.setRGB(0, 0.05 + pulse * 0.15, 0);
+                        allMeshes[i].material.opacity = 0.75 + pulse * 0.12;
+                    }
+                } else if (mood !== 'dormant') {
+                    headGroup.rotation.y = Math.sin(t * 0.3) * 0.1;
+                    headGroup.rotation.x = Math.sin(t * 0.2) * 0.02;
+                } else {
+                    headGroup.rotation.y = Math.sin(t * 0.1) * 0.15;
+                    headGroup.rotation.x = 0;
+                }
+            }
+            renderer.render(scene, camera);
+        })();
+
+        // --- Resize ---
+        function onResize() {
+            var r = container.getBoundingClientRect();
+            if (r.width > 10 && r.height > 10) {
+                camera.aspect = r.width / r.height;
+                camera.updateProjectionMatrix();
+                renderer.setSize(r.width, r.height);
+            }
+        }
+        window.addEventListener('resize', onResize);
+        setTimeout(onResize, 200);
+        setTimeout(onResize, 1000);
+
+        // --- Load model ---
+        if (statusEl) statusEl.textContent = '[ LOADING... ]';
+        new THREE.GLTFLoader().load('/static/head.glb', function(gltf) {
+            var model = gltf.scene;
+            var mat = new THREE.MeshPhongMaterial({
+                color: 0x00aa2a, emissive: 0x004400, specular: 0x44ff66,
+                shininess: 90, transparent: true, opacity: 0.85, side: THREE.DoubleSide
+            });
+            model.traverse(function(n) {
+                if (n.isMesh) {
+                    n.geometry.computeVertexNormals();
+                    n.material = mat.clone();
+                    allMeshes.push(n);
+                }
+            });
+            if (allMeshes.length === 0) return;
+
+            // HARDCODED transform from GLB binary analysis.
+            // Model center in world space: (7.283, -30.308, 175.391), maxDim: 0.677
+            // These values are EXACT — no bounding box computation needed.
+            // This eliminates the rotation-during-load bug that made the model fly offscreen.
+            var CX = 7.283, CY = -30.308, CZ = 175.391, MAX_DIM = 0.677;
+            var scale = 3.0 / MAX_DIM;
+
+            headGroup.add(model);
+            model.position.set(-CX, -CY, -CZ);
+            headGroup.scale.set(scale, scale, scale);
+            headGroup.rotation.set(0, 0, 0);
+            modelLoaded = true;
+
+            if (wakeRequested) {
+                setOpacity(1); mood = 'annoyed';
+                if (statusEl) { statusEl.textContent = '[ ONLINE ]'; statusEl.style.color = '#00ff41'; }
+            } else {
+                setOpacity(0.5);
+                if (statusEl) statusEl.textContent = '[ READY ]';
+            }
+        }, null, function(err) {
+            if (statusEl) statusEl.textContent = '[ LOAD ERROR ]';
+        });
+
+        // --- Public API (used by app.js) ---
+        chadAvatar = {
+            wake: function() {
+                wakeRequested = true; mood = 'annoyed';
+                if (!modelLoaded) return;
+                var p = 0;
+                (function fadeIn() {
+                    p += 0.03;
+                    if (p >= 1) {
+                        setOpacity(1);
+                        if (statusEl) { statusEl.textContent = '[ ONLINE — IRRITATED ]'; statusEl.style.color = '#00ff41'; }
+                        return;
+                    }
+                    setOpacity(p); requestAnimationFrame(fadeIn);
+                })();
+            },
+            sleep: function() {
+                mood = 'dormant'; wakeRequested = false; setOpacity(0.5);
+                if (statusEl) { statusEl.textContent = '[ DORMANT ]'; statusEl.style.color = '#004d00'; }
+            },
+            startTalking: function() { mood = 'talking'; },
+            stopTalking: function() { mood = 'annoyed'; }
+        };
+    })();
+    </script>
+</body>
+</html>
