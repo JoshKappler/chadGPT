@@ -369,6 +369,7 @@ class Qwen3TTSBackend:
                 verbose=False,
                 play=False,
                 temperature=temp,
+                max_tokens=50000,  # library default is 1200 which cuts off — set very high
             )
             if cfg_scale is not None:
                 gen_kwargs["cfg_scale"] = cfg_scale
