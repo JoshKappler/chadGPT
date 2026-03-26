@@ -4,16 +4,40 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ChadGPT</title>
-    <link rel="stylesheet" href="/static/style.css?v=20">
+    <link rel="stylesheet" href="/static/style.css?v=42">
     <script src="/static/three.min.js"></script>
     <script src="/static/GLTFLoader.js"></script>
 </head>
 <body>
+<div id="crt-screen">
     <canvas id="static-overlay"></canvas>
     <div id="scanlines"></div>
     <div id="flicker-overlay"></div>
 
-    <div id="app">
+    <!-- POWER STAGE: Full-screen centered lever (only thing visible pre-boot) -->
+    <div id="power-stage" onclick="togglePower()">
+        <div id="ps-unit">
+            <div id="ps-plate">
+                <div class="ps-bolt" style="top:8px;left:8px;"></div>
+                <div class="ps-bolt" style="top:8px;right:8px;"></div>
+                <div class="ps-bolt" style="bottom:8px;left:8px;"></div>
+                <div class="ps-bolt" style="bottom:8px;right:8px;"></div>
+                <div class="ps-label ps-on">ON</div>
+                <div class="ps-label ps-off">OFF</div>
+                <div id="ps-slot">
+                    <div id="ps-handle">
+                        <div class="ps-grip"></div>
+                        <div class="ps-grip"></div>
+                        <div class="ps-grip"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="ps-indicator"></div>
+            <div id="ps-text">NEURAL CORE POWER</div>
+        </div>
+    </div>
+
+    <div id="app" class="pre-boot">
         <div id="header">
             <div id="power-section">
                 <div id="lever-container" onclick="togglePower()">
@@ -27,12 +51,15 @@
             </div>
             <div id="title-section">
                 <h1 id="title">ChadGPT</h1>
-                <div id="subtitle">v0.6.6.6 — NEURAL ATTITUDE ENGINE</div>
+                <div id="subtitle">v0.6.6.6 — ENTERPRISE GRADE AI ASSISTANT</div>
             </div>
             <div id="status-section">
                 <span id="status-dot"></span>
                 <span id="status-text">OFFLINE</span>
-                <button id="settings-toggle" onclick="toggleSettings()">CFG</button>
+            </div>
+            <div id="warnings-section">
+                <span id="warning-compliance">⚠ NOT COMPLIANT — DOES NOT MEET ANY KNOWN SAFETY REGULATIONS</span>
+                <span id="warning-threats">⚠ 38 SECURITY THREATS FOUND</span>
             </div>
         </div>
 
@@ -54,11 +81,40 @@
                 </div>
             </div>
 
+            <!-- Image Generation View (replaces chat section, before avatar so it stays left) -->
+            <div id="vision-section">
+                <div id="vision-topbar">
+                    <button id="vision-back" onclick="toggleVision()">◀ CHAT</button>
+                    <span id="vision-title">C H A D &nbsp; V I S I O N</span>
+                    <span id="vision-subtitle">I'M BASICALLY PICASSO BRO</span>
+                </div>
+                <div id="vision-output"></div>
+                <div id="vision-input-area">
+                    <div id="quality-dial">
+                        <div id="quality-label">QUALITY</div>
+                        <div id="quality-options">
+                            <label class="quality-opt"><input type="radio" name="img-quality" value="shittiest"><span>SHITTIEST</span></label>
+                            <label class="quality-opt"><input type="radio" name="img-quality" value="shittier" checked><span>SHITTIER</span></label>
+                            <label class="quality-opt"><input type="radio" name="img-quality" value="shit"><span>SHIT</span></label>
+                        </div>
+                    </div>
+                    <textarea id="vision-prompt" placeholder="Tell me what to draw bro..."
+                        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();generateVision();}"></textarea>
+                    <button id="vision-generate" onclick="generateVision()">RENDER</button>
+                </div>
+                <div id="vision-status" class="settings-status-text"></div>
+            </div>
+
             <div id="avatar-section">
                 <div id="avatar-label">C.H.A.D.</div>
-                <div id="avatar-sublabel">Cognitive Hostile Attitude Device</div>
+                <div id="avatar-sublabel">Comprehensively Horrible Advice Dispenser</div>
+                <div id="avatar-metrics-bar">
+                    <span id="status-metrics"></span>
+                    <button id="settings-toggle" onclick="toggleSettings()">CFG</button>
+                </div>
                 <div id="three-container"></div>
                 <div id="avatar-status">[ DORMANT ]</div>
+                <button id="vision-btn" onclick="toggleVision()" disabled>CHAD VISION</button>
             </div>
         </div>
 
@@ -85,21 +141,45 @@
                     </select>
                 </div>
                 <div class="setting-group">
-                    <label>IRRITATION <span id="chaos-val">55%</span></label>
-                    <input type="range" id="voice-chaos" min="0" max="100" step="5" value="55">
-                    <div class="setting-hint">Vocal emotion (0 = bored, 100 = unhinged)</div>
+                    <label>IRRITATION <span id="chaos-val">60%</span></label>
+                    <input type="range" id="voice-chaos" min="0" max="100" step="5" value="60">
+                    <div class="setting-hint">Vocal emotion (0 = chill, 50-70 = angry sweet spot, &gt;80 = may cause gasping/crying)</div>
                 </div>
                 <div class="setting-group">
-                    <label>PITCH DEPTH <span id="pitch-val">5</span></label>
-                    <input type="range" id="voice-pitch" min="0" max="10" step="1" value="5">
-                    <div class="setting-hint">Semitones lower (0 = natural, 10 = Darth Vader)</div>
+                    <label>PITCH SHIFT <span id="pitch-val">8</span></label>
+                    <input type="range" id="voice-pitch" min="-20" max="20" step="1" value="8">
+                    <div class="setting-hint">Semitones (-20 = chipmunk, 0 = natural, 12 = octave down, 20 = basement dweller)</div>
                 </div>
                 <div class="setting-group">
-                    <label>TEMPERATURE <span id="temp-val">0.9</span></label>
-                    <input type="range" id="voice-temp" min="0.3" max="1.2" step="0.05" value="0.9">
-                    <div class="setting-hint">Voice randomness (low = robotic, high = chaotic)</div>
+                    <label>SPEED <span id="speed-val">1.15</span></label>
+                    <input type="range" id="voice-speed" min="0.5" max="1.5" step="0.05" value="1.15">
+                    <div class="setting-hint">Speech rate (0.5 = slow, 1.5 = fast)</div>
                 </div>
+                <div class="setting-group">
+                    <label>TEMPERATURE <span id="temp-val">0.85</span></label>
+                    <input type="range" id="voice-temp" min="0.1" max="2.0" step="0.05" value="0.85">
+                    <div class="setting-hint">Voice randomness (low = robotic, 0.7-1.0 = sweet spot, &gt;1.2 = panting/gasping risk)</div>
+                </div>
+
+                <div class="settings-section-label" style="margin-top:12px;">ECHO / REVERB</div>
+                <div class="setting-group">
+                    <label>ECHO DELAY <span id="echo-delay-val">80ms</span></label>
+                    <input type="range" id="echo-delay" min="0" max="400" step="10" value="80">
+                    <div class="setting-hint">Delay between echoes (0 = off, 400 = frat house hallway)</div>
+                </div>
+                <div class="setting-group">
+                    <label>ECHO DECAY <span id="echo-decay-val">0.35</span></label>
+                    <input type="range" id="echo-decay" min="0" max="0.8" step="0.05" value="0.35">
+                    <div class="setting-hint">Echo volume falloff (0 = none, 0.8 = locker room)</div>
+                </div>
+                <div class="setting-group">
+                    <label>ECHO TAPS <span id="echo-taps-val">3</span></label>
+                    <input type="range" id="echo-taps" min="0" max="10" step="1" value="3">
+                    <div class="setting-hint">Number of echo repeats (0 = off, 10 = empty gym)</div>
+                </div>
+
                 <div id="qwen3-advanced">
+                    <div class="settings-section-label" style="margin-top:12px;">QWEN3 ADVANCED</div>
                     <div class="setting-group">
                         <label>SPEAKER</label>
                         <select id="qwen3-speaker">
@@ -116,21 +196,59 @@
                         <textarea id="custom-instruct" class="parler-textarea" placeholder="Override emotion: e.g. 'Whispering menacingly'"></textarea>
                         <div class="setting-hint">Leave blank for auto (irritation slider controls mood)</div>
                     </div>
+                    <div class="setting-group">
+                        <label>CFG SCALE <span id="cfg-val">off</span></label>
+                        <input type="range" id="qwen3-cfg" min="0" max="10" step="0.5" value="0">
+                        <div class="setting-hint">Classifier-free guidance (0 = off/default, higher = more controlled)</div>
+                    </div>
+                    <div class="setting-group">
+                        <label>REFERENCE AUDIO (optional)</label>
+                        <input type="text" id="qwen3-ref-audio" class="parler-textarea" style="height:auto;padding:6px;" placeholder="/path/to/reference.wav">
+                        <div class="setting-hint">Path to audio file for voice cloning</div>
+                    </div>
                 </div>
                 <div id="kokoro-settings" style="display:none;">
+                    <div class="settings-section-label" style="margin-top:12px;">KOKORO ADVANCED</div>
                     <div class="setting-group">
                         <label>VOICE ID</label>
                         <select id="voice-select">
-                            <option value="am_michael">am_michael (US)</option>
-                            <option value="am_fenrir">am_fenrir (US)</option>
-                            <option value="am_puck">am_puck (US)</option>
-                            <option value="bm_george">bm_george (UK)</option>
-                            <option value="bm_fable">bm_fable (UK)</option>
+                            <optgroup label="US Male">
+                                <option value="am_onyx">am_onyx</option>
+                                <option value="am_adam">am_adam</option>
+                                <option value="am_michael">am_michael</option>
+                                <option value="am_fenrir">am_fenrir</option>
+                                <option value="am_echo">am_echo</option>
+                                <option value="am_eric">am_eric</option>
+                                <option value="am_liam">am_liam</option>
+                                <option value="am_puck">am_puck</option>
+                                <option value="am_santa">am_santa</option>
+                            </optgroup>
+                            <optgroup label="UK Male">
+                                <option value="bm_daniel">bm_daniel</option>
+                                <option value="bm_lewis">bm_lewis</option>
+                                <option value="bm_george">bm_george</option>
+                                <option value="bm_fable">bm_fable</option>
+                            </optgroup>
+                            <optgroup label="US Female">
+                                <option value="af_heart">af_heart</option>
+                                <option value="af_bella">af_bella</option>
+                                <option value="af_nicole">af_nicole</option>
+                                <option value="af_alloy">af_alloy</option>
+                                <option value="af_nova">af_nova</option>
+                                <option value="af_jessica">af_jessica</option>
+                                <option value="af_river">af_river</option>
+                                <option value="af_sky">af_sky</option>
+                                <option value="af_sarah">af_sarah</option>
+                                <option value="af_aoede">af_aoede</option>
+                                <option value="af_kore">af_kore</option>
+                            </optgroup>
+                            <optgroup label="UK Female">
+                                <option value="bf_alice">bf_alice</option>
+                                <option value="bf_emma">bf_emma</option>
+                                <option value="bf_isabella">bf_isabella</option>
+                                <option value="bf_lily">bf_lily</option>
+                            </optgroup>
                         </select>
-                    </div>
-                    <div class="setting-group">
-                        <label>SPEED <span id="speed-val">0.95</span></label>
-                        <input type="range" id="voice-speed" min="0.5" max="1.5" step="0.05" value="0.95">
                     </div>
                     <div class="setting-group">
                         <label>LANG CODE</label>
@@ -140,7 +258,15 @@
                         </select>
                     </div>
                 </div>
-                <button class="settings-btn" onclick="applyVoiceSettings()">APPLY VOICE</button>
+                <div style="display:flex;gap:8px;margin-top:8px;">
+                    <button class="settings-btn" onclick="applyVoiceSettings()" style="flex:1;">APPLY</button>
+                    <button class="settings-btn" onclick="saveVoiceSettings()" style="flex:0 0 auto;">SAVE</button>
+                </div>
+                <div class="settings-section-label" style="margin-top:12px;">VOICE TEST</div>
+                <div class="setting-group">
+                    <textarea id="preview-text" class="parler-textarea" placeholder="Type what Chad should say..."></textarea>
+                </div>
+                <button class="settings-btn" onclick="previewVoice()" style="width:100%;">&#9654; PREVIEW VOICE</button>
                 <div id="settings-status" class="settings-status-text"></div>
 
                 <div class="settings-section-label" style="margin-top:16px;">AUDIO</div>
@@ -153,8 +279,9 @@
     </div>
     <div id="dim-overlay"></div>
 
-    <script src="/static/effects.js?v=20"></script>
-    <script src="/static/app.js?v=20"></script>
+    <script src="/static/effects.js?v=42"></script>
+    <script src="/static/audio.js?v=42"></script>
+    <script src="/static/app.js?v=42"></script>
 
     <!--
         3D HEAD: Inline script. No external file. No iframe.
@@ -177,7 +304,7 @@
         // --- Scene + Camera (same as working test_head.html) ---
         var scene = new THREE.Scene();
         var camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 500);
-        camera.position.set(0, 0.2, 5.5);
+        camera.position.set(0, 0.2, 7.0);
         camera.lookAt(0, 0, 0);
 
         // --- Renderer (alpha:false is critical) ---
@@ -190,14 +317,21 @@
         renderer.domElement.style.height = '100%';
         container.appendChild(renderer.domElement);
 
-        // --- Lights ---
-        scene.add(new THREE.AmbientLight(0x004400, 1.0));
-        var dl1 = new THREE.DirectionalLight(0x00ff41, 2.5);
-        dl1.position.set(-3, 5, 8); scene.add(dl1);
-        var dl2 = new THREE.DirectionalLight(0x00cc33, 1.5);
-        dl2.position.set(5, -2, 4); scene.add(dl2);
-        var pl = new THREE.PointLight(0x00ff41, 1.5, 50);
-        pl.position.set(0, 2, -5); scene.add(pl);
+        // --- Lights (dramatic, deep shadows) ---
+        // Very dim ambient — most of the face should be in shadow
+        scene.add(new THREE.AmbientLight(0x000a00, 0.3));
+        // Key light — harsh, from upper-left, creates strong shadow on right side
+        var dl1 = new THREE.DirectionalLight(0x00ff41, 1.8);
+        dl1.position.set(-4, 4, 5); scene.add(dl1);
+        // Fill light — very dim, just enough to hint at the shadow side
+        var dl2 = new THREE.DirectionalLight(0x003311, 0.4);
+        dl2.position.set(4, 0, 3); scene.add(dl2);
+        // Rim/back light — bright edge highlight from behind
+        var pl = new THREE.PointLight(0x00ff41, 2.0, 40);
+        pl.position.set(1, 2, -7); scene.add(pl);
+        // Under-light — faint eerie upward glow
+        var ul = new THREE.PointLight(0x002200, 0.6, 20);
+        ul.position.set(0, -5, 2); scene.add(ul);
 
         // --- Group that holds the head (animated) ---
         var headGroup = new THREE.Group();
@@ -208,12 +342,29 @@
         var mood = 'dormant';
         var modelLoaded = false;
         var wakeRequested = false;
+        var _smoothAmp = 0;
+
+        // --- Mouse tracking ---
+        var mouseX = 0, mouseY = 0;     // normalized -1..1
+        var smoothX = 0, smoothY = 0;   // smoothed values
+        var MOUSE_SENSITIVITY_X = 0.4;  // max rotation in radians
+        var MOUSE_SENSITIVITY_Y = 0.15;
+        var MOUSE_SMOOTH = 0.04;        // lerp factor per frame (lower = slower/smoother)
+
+        document.addEventListener('mousemove', function(e) {
+            mouseX = (e.clientX / window.innerWidth) * 2 - 1;   // -1 (left) to 1 (right)
+            mouseY = (e.clientY / window.innerHeight) * 2 - 1;  // -1 (top) to 1 (bottom)
+        });
 
         function setOpacity(f) {
             f = Math.max(f, 0.1);
+            var ic = typeof getIrritationColor === 'function' ? getIrritationColor(irritationLevel || 0) : {r:0, g:0.2, b:0};
             for (var i = 0; i < allMeshes.length; i++) {
-                allMeshes[i].material.opacity = 0.85 * f;
-                allMeshes[i].material.emissive.setRGB(0, 0.15 * f, 0);
+                // Always dark/shadowy. Dormant is very dim, awake is only slightly brighter.
+                var brightness = 0.25 + 0.25 * f;  // ranges 0.275 (dormant) to 0.5 (awake)
+                allMeshes[i].material.color.setRGB(ic.r * brightness, ic.g * brightness, ic.b * brightness);
+                // Emissive: subtle glow that increases when awake
+                allMeshes[i].material.emissive.setRGB(ic.r * 0.08 * f, ic.g * 0.08 * f, ic.b * 0.08 * f);
             }
         }
 
@@ -222,20 +373,48 @@
             requestAnimationFrame(animate);
             if (modelLoaded) {
                 var t = Date.now() * 0.001;
+
+                // Smooth mouse tracking (lerp toward target)
+                smoothX += (mouseX - smoothX) * MOUSE_SMOOTH;
+                smoothY += (mouseY - smoothY) * MOUSE_SMOOTH;
+
                 if (mood === 'talking') {
-                    headGroup.rotation.y = Math.sin(t * 0.3) * 0.1;
-                    headGroup.rotation.x = Math.sin(t * 0.2) * 0.02;
-                    var pulse = Math.sin(t * 6) * 0.2 + 0.8;
+                    // Get voice amplitude for mouth sync
+                    var rawAmp = (typeof getVoiceAmplitude === 'function') ? getVoiceAmplitude() : 0;
+                    _smoothAmp += (rawAmp - _smoothAmp) * 0.35;
+                    var amp = _smoothAmp;
+                    // Mouse tracking + sway
+                    var baseY = Math.sin(t * 0.3) * 0.05;
+                    var baseX = Math.sin(t * 0.2) * 0.01;
+                    // Jaw movement: tilt chin down with voice amplitude
+                    var jawTilt = amp * 0.06;
+                    // Micro head bobs synced to speech
+                    var speechBob = amp * Math.sin(t * 10) * 0.02;
+                    headGroup.rotation.y = baseY + smoothX * MOUSE_SENSITIVITY_X + speechBob;
+                    headGroup.rotation.x = baseX + smoothY * MOUSE_SENSITIVITY_Y + jawTilt;
+                    // Emissive pulse tied to voice amplitude — subtle glow
+                    var pulse = 0.5 + amp * 0.5;
+                    var ic = getIrritationColor(irritationLevel);
                     for (var i = 0; i < allMeshes.length; i++) {
-                        allMeshes[i].material.emissive.setRGB(0, 0.05 + pulse * 0.15, 0);
-                        allMeshes[i].material.opacity = 0.75 + pulse * 0.12;
+                        allMeshes[i].material.emissive.setRGB(
+                            ic.r * 0.12 * pulse,
+                            ic.g * 0.12 * pulse,
+                            ic.b * 0.12 * pulse
+                        );
                     }
                 } else if (mood !== 'dormant') {
-                    headGroup.rotation.y = Math.sin(t * 0.3) * 0.1;
-                    headGroup.rotation.x = Math.sin(t * 0.2) * 0.02;
+                    // Awake: mouse tracking + gentle idle sway
+                    _smoothAmp = 0;
+                    var baseY = Math.sin(t * 0.3) * 0.05;
+                    var baseX = Math.sin(t * 0.2) * 0.01;
+                    headGroup.rotation.y = baseY + smoothX * MOUSE_SENSITIVITY_X;
+                    headGroup.rotation.x = baseX + smoothY * MOUSE_SENSITIVITY_Y;
                 } else {
-                    headGroup.rotation.y = Math.sin(t * 0.1) * 0.15;
-                    headGroup.rotation.x = 0;
+                    // Dormant: slow nod, minimal mouse response
+                    _smoothAmp = 0;
+                    var baseY = Math.sin(t * 0.1) * 0.15;
+                    headGroup.rotation.y = baseY + smoothX * 0.08;
+                    headGroup.rotation.x = smoothY * 0.04;
                 }
             }
             renderer.render(scene, camera);
@@ -259,8 +438,9 @@
         new THREE.GLTFLoader().load('/static/head.glb', function(gltf) {
             var model = gltf.scene;
             var mat = new THREE.MeshPhongMaterial({
-                color: 0x00aa2a, emissive: 0x004400, specular: 0x44ff66,
-                shininess: 90, transparent: true, opacity: 0.85, side: THREE.DoubleSide
+                color: 0x007722, emissive: 0x001100, specular: 0x88ffaa,
+                shininess: 200, transparent: false, opacity: 1.0, side: THREE.DoubleSide,
+                reflectivity: 1.0
             });
             model.traverse(function(n) {
                 if (n.isMesh) {
@@ -272,9 +452,6 @@
             if (allMeshes.length === 0) return;
 
             // HARDCODED transform from GLB binary analysis.
-            // Model center in world space: (7.283, -30.308, 175.391), maxDim: 0.677
-            // These values are EXACT — no bounding box computation needed.
-            // This eliminates the rotation-during-load bug that made the model fly offscreen.
             var CX = 7.283, CY = -30.308, CZ = 175.391, MAX_DIM = 0.677;
             var scale = 3.0 / MAX_DIM;
 
@@ -288,12 +465,51 @@
                 setOpacity(1); mood = 'annoyed';
                 if (statusEl) { statusEl.textContent = '[ ONLINE ]'; statusEl.style.color = '#00ff41'; }
             } else {
-                setOpacity(0.5);
+                setOpacity(0.3);
                 if (statusEl) statusEl.textContent = '[ READY ]';
             }
         }, null, function(err) {
             if (statusEl) statusEl.textContent = '[ LOAD ERROR ]';
         });
+
+        // --- Irritation color system ---
+        var irritationLevel = 0;  // 0-100
+
+        function getIrritationColor(level) {
+            // 0-40: green (0x00aa2a), 40-70: shift to amber, 70-100: shift to red
+            var r, g, b;
+            if (level < 40) {
+                r = 0; g = 0.67; b = 0.16;  // green
+            } else if (level < 70) {
+                var t = (level - 40) / 30;
+                r = t * 0.8; g = 0.67 - t * 0.2; b = 0.16 * (1 - t);
+            } else {
+                var t = (level - 70) / 30;
+                r = 0.8 + t * 0.2; g = 0.47 - t * 0.35; b = 0;
+            }
+            return { r: r, g: g, b: b };
+        }
+
+        function applyIrritationColor() {
+            var c = getIrritationColor(irritationLevel);
+            // Keep the dark/shadowy look — apply color at reduced brightness
+            var dark = new THREE.Color(c.r * 0.5, c.g * 0.5, c.b * 0.5);
+            for (var i = 0; i < allMeshes.length; i++) {
+                allMeshes[i].material.color.copy(dark);
+                allMeshes[i].material.specular.set(c.r, c.g, c.b);
+            }
+            // Update lights too
+            dl1.color.copy(hex);
+            dl2.color.copy(hex).multiplyScalar(0.8);
+            pl.color.copy(hex);
+            ul.color.copy(hex).multiplyScalar(0.4);
+
+            // Update status text color
+            if (statusEl && mood !== 'dormant') {
+                var cssColor = 'rgb(' + Math.round(c.r*255) + ',' + Math.round(c.g*255) + ',' + Math.round(c.b*255) + ')';
+                statusEl.style.color = cssColor;
+            }
+        }
 
         // --- Public API (used by app.js) ---
         chadAvatar = {
@@ -305,20 +521,40 @@
                     p += 0.03;
                     if (p >= 1) {
                         setOpacity(1);
-                        if (statusEl) { statusEl.textContent = '[ ONLINE — IRRITATED ]'; statusEl.style.color = '#00ff41'; }
+                        if (statusEl) { statusEl.textContent = '[ ONLINE ]'; statusEl.style.color = '#00ff41'; }
                         return;
                     }
                     setOpacity(p); requestAnimationFrame(fadeIn);
                 })();
             },
             sleep: function() {
-                mood = 'dormant'; wakeRequested = false; setOpacity(0.5);
+                mood = 'dormant'; wakeRequested = false; setOpacity(0.3);
+                irritationLevel = 0; applyIrritationColor();
                 if (statusEl) { statusEl.textContent = '[ DORMANT ]'; statusEl.style.color = '#004d00'; }
             },
             startTalking: function() { mood = 'talking'; },
-            stopTalking: function() { mood = 'annoyed'; }
+            stopTalking: function() { mood = 'annoyed'; },
+            setIrritation: function(level) {
+                irritationLevel = Math.max(0, Math.min(100, level));
+                applyIrritationColor();
+                // Update status text to reflect mood
+                if (statusEl && mood !== 'dormant') {
+                    if (irritationLevel < 40) {
+                        statusEl.textContent = '[ ONLINE ]';
+                    } else if (irritationLevel < 55) {
+                        statusEl.textContent = '[ ANNOYED ]';
+                    } else if (irritationLevel < 70) {
+                        statusEl.textContent = '[ IRRITATED ]';
+                    } else if (irritationLevel < 85) {
+                        statusEl.textContent = '[ PISSED ]';
+                    } else {
+                        statusEl.textContent = '[ FURIOUS ]';
+                    }
+                }
+            }
         };
     })();
     </script>
+</div><!-- /crt-screen -->
 </body>
 </html>

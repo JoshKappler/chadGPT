@@ -123,6 +123,10 @@ function ensurePython() {
     if (needsInstall) {
         dim('  Installing dependencies...');
         execSync('./venv/bin/pip install -q -r requirements.txt', { stdio: 'inherit' });
+        // kokoro pulls misaki[en] which pulls spacy — install kokoro without transitive deps,
+        // then install spacy from pre-built wheels only (blis won't compile on Python 3.13)
+        execSync('./venv/bin/pip install -q --no-deps kokoro', { stdio: 'inherit' });
+        execSync('./venv/bin/pip install -q --only-binary=:all: spacy', { stdio: 'inherit' });
         execSync('touch venv/.deps_installed');
     } else {
         dim('  Dependencies already installed.');
