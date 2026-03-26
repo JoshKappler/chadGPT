@@ -348,29 +348,26 @@ var chadAudio = (function () {
         clickG.connect(out);
         clickSrc.start(now);
 
-        // --- 2. Bottom-out: low thud as keycap hits plate ---
+        // --- 2. Bottom-out: filtered noise thud as keycap hits plate ---
         var thudDelay = 0.008 + Math.random() * 0.006; // 8-14ms after click
-        var thudDur = isSpace ? 0.06 : 0.03 + Math.random() * 0.02;
+        var thudDur = isSpace ? 0.05 : 0.02 + Math.random() * 0.015;
         var thudLen = Math.floor(sr * thudDur);
         var thudBuf = ctx.createBuffer(1, thudLen, sr);
         var td = thudBuf.getChannelData(0);
-        var thudFreq = isSpace ? (60 + Math.random() * 30) : (100 + Math.random() * 80);
-        // Housing resonance: the plate/case ringing
-        var resFreq = isSpace ? (150 + Math.random() * 50) : (250 + Math.random() * 150);
+        // Pure noise with sharp exponential decay — no sine waves (avoids beep)
+        var decay = isSpace ? 50 : 80;
         for (var i = 0; i < thudLen; i++) {
             var t = i / sr;
-            var impact = Math.sin(t * thudFreq * Math.PI * 2) * Math.exp(-t * (isSpace ? 40 : 60));
-            var resonance = Math.sin(t * resFreq * Math.PI * 2) * Math.exp(-t * 80) * 0.3;
-            var plateNoise = (Math.random() * 2 - 1) * Math.exp(-t * 120) * 0.15;
-            td[i] = (impact + resonance + plateNoise) * stiffness;
+            td[i] = (Math.random() * 2 - 1) * Math.exp(-t * decay) * stiffness;
         }
         var thudSrc = ctx.createBufferSource();
         thudSrc.buffer = thudBuf;
         var thudLP = ctx.createBiquadFilter();
         thudLP.type = 'lowpass';
-        thudLP.frequency.value = isSpace ? 400 : 800;
+        thudLP.frequency.value = isSpace ? 350 : 600;
+        thudLP.Q.value = 0.5;
         var thudG = ctx.createGain();
-        thudG.gain.value = (isSpace ? 0.30 : 0.18) + Math.random() * 0.06;
+        thudG.gain.value = (isSpace ? 0.22 : 0.14) + Math.random() * 0.04;
         thudSrc.connect(thudLP);
         thudLP.connect(thudG);
         thudG.connect(out);

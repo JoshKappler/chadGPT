@@ -393,9 +393,10 @@
                     headGroup.rotation.y = baseY + smoothX * MOUSE_SENSITIVITY_X + speechBob;
                     headGroup.rotation.x = baseX + smoothY * MOUSE_SENSITIVITY_Y;
                     // Jaw rotation: pivot open proportional to amplitude
-                    // Positive X rotation tilts the jaw downward (opens mouth)
+                    // Negative X rotation tilts the chin downward (opens mouth)
+                    // in our flipped coordinate system
                     if (jawGroup) {
-                        var jawOpen = amp * 0.18; // radians — ~10 degrees at full amp
+                        var jawOpen = amp * -0.15; // radians — ~8.5 degrees at full amp
                         jawGroup.rotation.x = jawOpen;
                     }
                     // Emissive pulse tied to voice amplitude — subtle glow
@@ -446,20 +447,32 @@
         new THREE.GLTFLoader().load('/static/head.glb', function(gltf) {
             var model = gltf.scene;
 
-            // Corrected transform from GLB binary analysis (vertex bounds).
-            // Model X: -0.02..133.18, Y: -200.01..-0.03, Z: 0.01..138.39
-            var CX = 66.582, CY = -100.022, CZ = 69.198, MAX_DIM = 199.985;
+            // GLB vertex bounds: X: -0.02..133.18, Y: -200.01..-0.03, Z: 0.01..138.39
+            // Model orientation (from visual inspection):
+            //   Y=-200 = top of head (hair), Y=0 = neck base  → Y is INVERTED
+            //   Z=0 = face, Z=138 = back of head (hair)       → Z is INVERTED
+            // Fix: negate Y and Z during vertex extraction to get standard orientation:
+            //   +Y = up (top of head), +Z = toward camera (face)
+            //
+            // After flipping, the coordinate ranges become:
+            //   X: -0.02..133.18 (unchanged), center = 66.582
+            //   Y: 0.03..200.01 (flipped), center = 100.022
+            //   Z: -138.39..-0.01 (flipped), center = -69.198
+            var FCX = 66.582, FCY = 100.022, FCZ = -69.198;
+            var MAX_DIM = 199.985;
             var scale = 3.0 / MAX_DIM;  // ~0.015
 
-            // Jaw split threshold in MODEL space.
-            // Nose tip Y≈-42, mouth center Y≈-59. Split at Y=-65
-            // (just below lower lip, above chin).
-            var JAW_SPLIT_Y = -65;
-            // Jaw hinge point in MODEL space — near the ears at nose height,
-            // toward back of head. This is the pivot for jaw rotation.
-            var HINGE_X = CX;         // horizontally centered
-            var HINGE_Y = -48;        // just below nose, at jaw joint level
-            var HINGE_Z = CZ * 0.45;  // halfway back in the head
+            // Jaw split in FLIPPED coords.
+            // Original: nose Y≈-42 → flipped Y≈42, mouth Y≈-59 → flipped Y≈59
+            // Mouth gap: original Y=-95..-70 → flipped Y=70..95
+            // Jaw (chin/neck) is BELOW the mouth: flipped Y < 70
+            // Cranium (upper face, forehead, hair) is ABOVE: flipped Y >= 70
+            var JAW_SPLIT_Y = 70;
+
+            // Jaw hinge in FLIPPED coords — at TMJ joint level (mouth line, mid-depth)
+            var HINGE_X = FCX;
+            var HINGE_Y = JAW_SPLIT_Y;  // at the split line
+            var HINGE_Z = FCZ;           // center depth
 
             var mat = new THREE.MeshPhongMaterial({
                 color: 0x007722, emissive: 0x001100, specular: 0x88ffaa,
@@ -477,7 +490,7 @@
             });
             if (origGeometries.length === 0) return;
 
-            // Split each geometry into cranium (above JAW_SPLIT_Y) and jaw (below)
+            // Split each geometry into cranium and jaw, flipping Y and Z
             for (var gi = 0; gi < origGeometries.length; gi++) {
                 var geo = origGeometries[gi];
                 var pos = geo.attributes.position;
@@ -485,8 +498,6 @@
                 var idx = geo.index ? geo.index.array : null;
                 var triCount = idx ? idx.length / 3 : pos.count / 3;
 
-                // Classify each triangle: if ALL vertices are below split → jaw
-                // Mixed triangles go to cranium (avoids visible seam)
                 var craniumVerts = [], craniumNorms = [];
                 var jawVerts = [], jawNorms = [];
 
@@ -495,15 +506,18 @@
                     var i1 = idx ? idx[ti*3+1] : ti*3+1;
                     var i2 = idx ? idx[ti*3+2] : ti*3+2;
 
-                    var y0 = pos.getY(i0), y1 = pos.getY(i1), y2 = pos.getY(i2);
-                    var allBelow = (y0 < JAW_SPLIT_Y) && (y1 < JAW_SPLIT_Y) && (y2 < JAW_SPLIT_Y);
+                    // Flipped Y values for classification
+                    var fy0 = -pos.getY(i0), fy1 = -pos.getY(i1), fy2 = -pos.getY(i2);
+                    // Jaw = ALL vertices below split (chin/neck area)
+                    var isJaw = (fy0 < JAW_SPLIT_Y) && (fy1 < JAW_SPLIT_Y) && (fy2 < JAW_SPLIT_Y);
 
-                    var target = allBelow ? jawVerts : craniumVerts;
-                    var targetN = allBelow ? jawNorms : craniumNorms;
+                    var target = isJaw ? jawVerts : craniumVerts;
+                    var targetN = isJaw ? jawNorms : craniumNorms;
                     for (var vi = 0; vi < 3; vi++) {
                         var ii = [i0, i1, i2][vi];
-                        target.push(pos.getX(ii), pos.getY(ii), pos.getZ(ii));
-                        targetN.push(norm.getX(ii), norm.getY(ii), norm.getZ(ii));
+                        // Flip Y and Z during extraction
+                        target.push(pos.getX(ii), -pos.getY(ii), -pos.getZ(ii));
+                        targetN.push(norm.getX(ii), -norm.getY(ii), -norm.getZ(ii));
                     }
                 }
 
@@ -514,14 +528,13 @@
                     cGeo.setAttribute('normal', new THREE.Float32BufferAttribute(craniumNorms, 3));
                     var cMat = mat.clone();
                     var cMesh = new THREE.Mesh(cGeo, cMat);
-                    cMesh.position.set(-CX, -CY, -CZ); // center it
+                    cMesh.position.set(-FCX, -FCY, -FCZ); // center in flipped space
                     headGroup.add(cMesh);
                     allMeshes.push(cMesh);
                 }
 
-                // Build jaw mesh — offset to hinge, then we'll pivot the parent group
+                // Build jaw mesh — offset to hinge point
                 if (jawVerts.length > 0) {
-                    // Shift jaw vertices so the hinge point is at local origin
                     for (var vi = 0; vi < jawVerts.length; vi += 3) {
                         jawVerts[vi]   -= HINGE_X;
                         jawVerts[vi+1] -= HINGE_Y;
@@ -533,10 +546,10 @@
                     var jMat = mat.clone();
                     var jMesh = new THREE.Mesh(jGeo, jMat);
 
-                    // jawGroup sits at the hinge point (in centered model space)
                     if (!jawGroup) {
                         jawGroup = new THREE.Group();
-                        jawGroup.position.set(HINGE_X - CX, HINGE_Y - CY, HINGE_Z - CZ);
+                        // Hinge position in centered flipped space
+                        jawGroup.position.set(HINGE_X - FCX, HINGE_Y - FCY, HINGE_Z - FCZ);
                         headGroup.add(jawGroup);
                     }
                     jawGroup.add(jMesh);
