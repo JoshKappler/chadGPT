@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ChadGPT</title>
-    <link rel="stylesheet" href="/static/style.css?v=50">
+    <link rel="stylesheet" href="/static/style.css?v=70">
     <script src="/static/three.min.js"></script>
     <script src="/static/GLTFLoader.js"></script>
 </head>
@@ -137,6 +137,7 @@
                     <label>TTS ENGINE</label>
                     <select id="tts-engine">
                         <option value="qwen3" selected>Qwen3-TTS (Emotional)</option>
+                        <option value="orpheus">Orpheus (Emotive/3B)</option>
                         <option value="kokoro">Kokoro (Fast/Flat)</option>
                     </select>
                 </div>
@@ -205,6 +206,22 @@
                         <label>REFERENCE AUDIO (optional)</label>
                         <input type="text" id="qwen3-ref-audio" class="parler-textarea" style="height:auto;padding:6px;" placeholder="/path/to/reference.wav">
                         <div class="setting-hint">Path to audio file for voice cloning</div>
+                    </div>
+                </div>
+                <div id="orpheus-settings" style="display:none;">
+                    <div class="settings-section-label" style="margin-top:12px;">ORPHEUS ADVANCED</div>
+                    <div class="setting-group">
+                        <label>SPEAKER</label>
+                        <select id="orpheus-voice">
+                            <option value="leo" selected>leo (Authoritative)</option>
+                            <option value="dan">dan (Friendly)</option>
+                            <option value="zac">zac (Enthusiastic)</option>
+                            <option value="tara">tara (Conversational)</option>
+                            <option value="leah">leah (Warm)</option>
+                            <option value="jess">jess (Energetic)</option>
+                            <option value="mia">mia (Professional)</option>
+                            <option value="zoe">zoe (Calm)</option>
+                        </select>
                     </div>
                 </div>
                 <div id="kokoro-settings" style="display:none;">
@@ -279,9 +296,9 @@
     </div>
     <div id="dim-overlay"></div>
 
-    <script src="/static/effects.js?v=50"></script>
-    <script src="/static/audio.js?v=50"></script>
-    <script src="/static/app.js?v=50"></script>
+    <script src="/static/effects.js?v=70"></script>
+    <script src="/static/audio.js?v=70"></script>
+    <script src="/static/app.js?v=70"></script>
 
     <!--
         3D HEAD: Inline script. No external file. No iframe.

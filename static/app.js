@@ -989,6 +989,7 @@ function gatherVoiceSettings() {
         cfg_scale: cfgVal > 0 ? cfgVal : null,
         ref_audio: document.getElementById('qwen3-ref-audio')?.value || '',
         ref_text: document.getElementById('qwen3-ref-text')?.value || '',
+        orpheus_voice: document.getElementById('orpheus-voice')?.value || 'leo',
     };
 }
 
@@ -1040,9 +1041,11 @@ async function loadSavedVoiceSettings() {
         if (cfg.ref_audio) setVal('qwen3-ref-audio', cfg.ref_audio);
         if (cfg.ref_text) setVal('qwen3-ref-text', cfg.ref_text);
         // Toggle engine panels
-        const isQwen = cfg.engine === 'qwen3';
-        document.getElementById('kokoro-settings').style.display = isQwen ? 'none' : 'block';
-        document.getElementById('qwen3-advanced').style.display = isQwen ? 'block' : 'none';
+        var eng = cfg.engine || 'qwen3';
+        var _oe = document.getElementById('orpheus-settings');
+        if (_oe) _oe.style.display = eng === 'orpheus' ? 'block' : 'none';
+        document.getElementById('kokoro-settings').style.display = eng === 'kokoro' ? 'block' : 'none';
+        document.getElementById('qwen3-advanced').style.display = eng === 'qwen3' ? 'block' : 'none';
     } catch(e) { console.warn('Failed to load voice config:', e); }
 }
 
@@ -1434,9 +1437,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const engineSelect = document.getElementById('tts-engine');
     if (engineSelect) {
         engineSelect.addEventListener('change', () => {
-            const isQwen = engineSelect.value === 'qwen3';
-            document.getElementById('kokoro-settings').style.display = isQwen ? 'none' : 'block';
-            document.getElementById('qwen3-advanced').style.display = isQwen ? 'block' : 'none';
+            var eng = engineSelect.value;
+            var _oe = document.getElementById('orpheus-settings');
+            if (_oe) _oe.style.display = eng === 'orpheus' ? 'block' : 'none';
+            document.getElementById('kokoro-settings').style.display = eng === 'kokoro' ? 'block' : 'none';
+            document.getElementById('qwen3-advanced').style.display = eng === 'qwen3' ? 'block' : 'none';
         });
     }
 
