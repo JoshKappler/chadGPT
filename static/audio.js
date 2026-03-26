@@ -308,56 +308,104 @@ var chadAudio = (function () {
         if (sessionSource) { try { sessionSource.stop(); } catch (e) {} sessionSource = null; }
     }
 
-    // --- Keyboard clack synthesis ---
-    // Generates varied mechanical key sounds from noise bursts + resonant filter
-    // Connects directly to AudioContext destination (not through master gain)
-    // so ambient music doesn't drown it out
+    // --- Realistic mechanical keyboard synthesis ---
+    // Models 3 phases of a keypress: downstroke click, bottom-out thud, upstroke tick.
+    // Randomizes per-key: size (spacebar vs letter vs modifier), switch stiffness,
+    // housing resonance, and keycap material. Bypasses master gain so ambient doesn't mask.
     function playKeyClack() {
         if (!ctx) return;
-
         var now = ctx.currentTime;
+        var sr = ctx.sampleRate;
+        var out = ctx.destination; // bypass master gain
 
-        // Longer noise burst for more audible click
-        var duration = 0.025 + Math.random() * 0.035; // 25-60ms
-        var sampleRate = ctx.sampleRate;
-        var frameCount = Math.floor(sampleRate * duration);
-        var noiseBuffer = ctx.createBuffer(1, frameCount, sampleRate);
-        var data = noiseBuffer.getChannelData(0);
-        for (var i = 0; i < frameCount; i++) {
-            var env = Math.exp(-i / (frameCount * 0.25));
-            data[i] = (Math.random() * 2 - 1) * env;
+        // --- Per-key randomization ---
+        var isSpace = Math.random() < 0.08;   // ~8% chance of spacebar (bigger, deeper)
+        var isMod = Math.random() < 0.12;     // ~12% modifier key (wider, duller)
+        var stiffness = 0.7 + Math.random() * 0.6; // switch spring tension
+
+        // --- 1. Downstroke click: sharp transient as switch actuates ---
+        var clickDur = 0.006 + Math.random() * 0.008; // 6-14ms
+        var clickLen = Math.floor(sr * clickDur);
+        var clickBuf = ctx.createBuffer(1, clickLen, sr);
+        var cd = clickBuf.getChannelData(0);
+        // Two-phase: sharp spike then fast ring-down
+        for (var i = 0; i < clickLen; i++) {
+            var t = i / sr;
+            var spike = (i < clickLen * 0.15) ? 1.0 : 0;
+            var ring = Math.sin(t * (3500 + Math.random() * 2000) * Math.PI * 2) * Math.exp(-t * 400);
+            var noise = (Math.random() * 2 - 1) * Math.exp(-t * 300) * 0.4;
+            cd[i] = (spike * 0.6 + ring * 0.5 + noise) * stiffness;
         }
+        var clickSrc = ctx.createBufferSource();
+        clickSrc.buffer = clickBuf;
+        var clickHP = ctx.createBiquadFilter();
+        clickHP.type = 'highpass';
+        clickHP.frequency.value = isSpace ? 800 : (isMod ? 1200 : 2000);
+        var clickG = ctx.createGain();
+        clickG.gain.value = (isSpace ? 0.20 : isMod ? 0.25 : 0.30) + Math.random() * 0.08;
+        clickSrc.connect(clickHP);
+        clickHP.connect(clickG);
+        clickG.connect(out);
+        clickSrc.start(now);
 
-        var src = ctx.createBufferSource();
-        src.buffer = noiseBuffer;
+        // --- 2. Bottom-out: low thud as keycap hits plate ---
+        var thudDelay = 0.008 + Math.random() * 0.006; // 8-14ms after click
+        var thudDur = isSpace ? 0.06 : 0.03 + Math.random() * 0.02;
+        var thudLen = Math.floor(sr * thudDur);
+        var thudBuf = ctx.createBuffer(1, thudLen, sr);
+        var td = thudBuf.getChannelData(0);
+        var thudFreq = isSpace ? (60 + Math.random() * 30) : (100 + Math.random() * 80);
+        // Housing resonance: the plate/case ringing
+        var resFreq = isSpace ? (150 + Math.random() * 50) : (250 + Math.random() * 150);
+        for (var i = 0; i < thudLen; i++) {
+            var t = i / sr;
+            var impact = Math.sin(t * thudFreq * Math.PI * 2) * Math.exp(-t * (isSpace ? 40 : 60));
+            var resonance = Math.sin(t * resFreq * Math.PI * 2) * Math.exp(-t * 80) * 0.3;
+            var plateNoise = (Math.random() * 2 - 1) * Math.exp(-t * 120) * 0.15;
+            td[i] = (impact + resonance + plateNoise) * stiffness;
+        }
+        var thudSrc = ctx.createBufferSource();
+        thudSrc.buffer = thudBuf;
+        var thudLP = ctx.createBiquadFilter();
+        thudLP.type = 'lowpass';
+        thudLP.frequency.value = isSpace ? 400 : 800;
+        var thudG = ctx.createGain();
+        thudG.gain.value = (isSpace ? 0.30 : 0.18) + Math.random() * 0.06;
+        thudSrc.connect(thudLP);
+        thudLP.connect(thudG);
+        thudG.connect(out);
+        thudSrc.start(now + thudDelay);
 
-        // Bandpass filter — vary center frequency for different key sounds
-        var filter = ctx.createBiquadFilter();
-        filter.type = 'bandpass';
-        filter.frequency.value = 1500 + Math.random() * 3500; // 1.5-5kHz
-        filter.Q.value = 1.0 + Math.random() * 2;
+        // --- 3. Upstroke tick: lighter click as spring pushes key back ---
+        var upDelay = 0.04 + Math.random() * 0.03; // 40-70ms after keydown
+        var upDur = 0.004 + Math.random() * 0.005;
+        var upLen = Math.floor(sr * upDur);
+        var upBuf = ctx.createBuffer(1, upLen, sr);
+        var ud = upBuf.getChannelData(0);
+        for (var i = 0; i < upLen; i++) {
+            var t = i / sr;
+            ud[i] = (Math.random() * 2 - 1) * Math.exp(-t * 500) * 0.7;
+            ud[i] += Math.sin(t * (4000 + Math.random() * 2000) * Math.PI * 2) * Math.exp(-t * 600) * 0.3;
+        }
+        var upSrc = ctx.createBufferSource();
+        upSrc.buffer = upBuf;
+        var upHP = ctx.createBiquadFilter();
+        upHP.type = 'highpass';
+        upHP.frequency.value = 2500;
+        var upG = ctx.createGain();
+        upG.gain.value = 0.12 + Math.random() * 0.06;
+        upSrc.connect(upHP);
+        upHP.connect(upG);
+        upG.connect(out);
+        upSrc.start(now + upDelay);
 
-        // Resonant body thud for bottom-out
-        var thudOsc = ctx.createOscillator();
-        thudOsc.type = 'sine';
-        thudOsc.frequency.value = 60 + Math.random() * 80; // 60-140Hz
-        var thudGain = ctx.createGain();
-        thudGain.gain.setValueAtTime(0.25, now);
-        thudGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-        thudOsc.connect(thudGain);
-        // Connect directly to destination, bypassing master gain
-        thudGain.connect(ctx.destination);
-        thudOsc.start(now);
-        thudOsc.stop(now + 0.05);
-
-        var clickGain = ctx.createGain();
-        clickGain.gain.value = 0.35 + Math.random() * 0.2; // 0.35-0.55 — loud and clear
-        src.connect(filter);
-        filter.connect(clickGain);
-        // Connect directly to destination so ambient doesn't mask it
-        clickGain.connect(ctx.destination);
-        src.start(now);
-        src.onended = function() { clickGain.disconnect(); filter.disconnect(); thudGain.disconnect(); };
+        // Cleanup
+        var cleanup = function() {
+            try { clickG.disconnect(); clickHP.disconnect(); } catch(e) {}
+            try { thudG.disconnect(); thudLP.disconnect(); } catch(e) {}
+            try { upG.disconnect(); upHP.disconnect(); } catch(e) {}
+        };
+        setTimeout(cleanup, 150);
     }
 
     // --- Tape warble sound (wobbly pitch variation like a worn cassette) ---

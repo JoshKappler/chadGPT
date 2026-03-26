@@ -343,6 +343,8 @@
         var modelLoaded = false;
         var wakeRequested = false;
         var _smoothAmp = 0;
+        var jawGroup = null;     // pivot group for jaw rotation
+        var jawMeshes = [];      // meshes in the jaw group (for color updates)
 
         // --- Mouse tracking ---
         var mouseX = 0, mouseY = 0;     // normalized -1..1
@@ -386,12 +388,16 @@
                     // Mouse tracking + sway
                     var baseY = Math.sin(t * 0.3) * 0.05;
                     var baseX = Math.sin(t * 0.2) * 0.01;
-                    // Jaw movement: tilt chin down with voice amplitude
-                    var jawTilt = amp * 0.06;
                     // Micro head bobs synced to speech
                     var speechBob = amp * Math.sin(t * 10) * 0.02;
                     headGroup.rotation.y = baseY + smoothX * MOUSE_SENSITIVITY_X + speechBob;
-                    headGroup.rotation.x = baseX + smoothY * MOUSE_SENSITIVITY_Y + jawTilt;
+                    headGroup.rotation.x = baseX + smoothY * MOUSE_SENSITIVITY_Y;
+                    // Jaw rotation: pivot open proportional to amplitude
+                    // Positive X rotation tilts the jaw downward (opens mouth)
+                    if (jawGroup) {
+                        var jawOpen = amp * 0.18; // radians — ~10 degrees at full amp
+                        jawGroup.rotation.x = jawOpen;
+                    }
                     // Emissive pulse tied to voice amplitude — subtle glow
                     var pulse = 0.5 + amp * 0.5;
                     var ic = getIrritationColor(irritationLevel);
@@ -405,6 +411,7 @@
                 } else if (mood !== 'dormant') {
                     // Awake: mouse tracking + gentle idle sway
                     _smoothAmp = 0;
+                    if (jawGroup) jawGroup.rotation.x = 0;
                     var baseY = Math.sin(t * 0.3) * 0.05;
                     var baseX = Math.sin(t * 0.2) * 0.01;
                     headGroup.rotation.y = baseY + smoothX * MOUSE_SENSITIVITY_X;
@@ -412,6 +419,7 @@
                 } else {
                     // Dormant: slow nod, minimal mouse response
                     _smoothAmp = 0;
+                    if (jawGroup) jawGroup.rotation.x = 0;
                     var baseY = Math.sin(t * 0.1) * 0.15;
                     headGroup.rotation.y = baseY + smoothX * 0.08;
                     headGroup.rotation.x = smoothY * 0.04;
@@ -437,29 +445,113 @@
         if (statusEl) statusEl.textContent = '[ LOADING... ]';
         new THREE.GLTFLoader().load('/static/head.glb', function(gltf) {
             var model = gltf.scene;
+
+            // Corrected transform from GLB binary analysis (vertex bounds).
+            // Model X: -0.02..133.18, Y: -200.01..-0.03, Z: 0.01..138.39
+            var CX = 66.582, CY = -100.022, CZ = 69.198, MAX_DIM = 199.985;
+            var scale = 3.0 / MAX_DIM;  // ~0.015
+
+            // Jaw split threshold in MODEL space.
+            // Nose tip Y≈-42, mouth center Y≈-59. Split at Y=-65
+            // (just below lower lip, above chin).
+            var JAW_SPLIT_Y = -65;
+            // Jaw hinge point in MODEL space — near the ears at nose height,
+            // toward back of head. This is the pivot for jaw rotation.
+            var HINGE_X = CX;         // horizontally centered
+            var HINGE_Y = -48;        // just below nose, at jaw joint level
+            var HINGE_Z = CZ * 0.45;  // halfway back in the head
+
             var mat = new THREE.MeshPhongMaterial({
                 color: 0x007722, emissive: 0x001100, specular: 0x88ffaa,
                 shininess: 200, transparent: false, opacity: 1.0, side: THREE.DoubleSide,
                 reflectivity: 1.0
             });
+
+            // Collect all geometries from the model
+            var origGeometries = [];
             model.traverse(function(n) {
                 if (n.isMesh) {
                     n.geometry.computeVertexNormals();
-                    n.material = mat.clone();
-                    allMeshes.push(n);
+                    origGeometries.push(n.geometry);
                 }
             });
-            if (allMeshes.length === 0) return;
+            if (origGeometries.length === 0) return;
 
-            // HARDCODED transform from GLB binary analysis.
-            var CX = 7.283, CY = -30.308, CZ = 175.391, MAX_DIM = 0.677;
-            var scale = 3.0 / MAX_DIM;
+            // Split each geometry into cranium (above JAW_SPLIT_Y) and jaw (below)
+            for (var gi = 0; gi < origGeometries.length; gi++) {
+                var geo = origGeometries[gi];
+                var pos = geo.attributes.position;
+                var norm = geo.attributes.normal;
+                var idx = geo.index ? geo.index.array : null;
+                var triCount = idx ? idx.length / 3 : pos.count / 3;
 
-            headGroup.add(model);
-            model.position.set(-CX, -CY, -CZ);
+                // Classify each triangle: if ALL vertices are below split → jaw
+                // Mixed triangles go to cranium (avoids visible seam)
+                var craniumVerts = [], craniumNorms = [];
+                var jawVerts = [], jawNorms = [];
+
+                for (var ti = 0; ti < triCount; ti++) {
+                    var i0 = idx ? idx[ti*3] : ti*3;
+                    var i1 = idx ? idx[ti*3+1] : ti*3+1;
+                    var i2 = idx ? idx[ti*3+2] : ti*3+2;
+
+                    var y0 = pos.getY(i0), y1 = pos.getY(i1), y2 = pos.getY(i2);
+                    var allBelow = (y0 < JAW_SPLIT_Y) && (y1 < JAW_SPLIT_Y) && (y2 < JAW_SPLIT_Y);
+
+                    var target = allBelow ? jawVerts : craniumVerts;
+                    var targetN = allBelow ? jawNorms : craniumNorms;
+                    for (var vi = 0; vi < 3; vi++) {
+                        var ii = [i0, i1, i2][vi];
+                        target.push(pos.getX(ii), pos.getY(ii), pos.getZ(ii));
+                        targetN.push(norm.getX(ii), norm.getY(ii), norm.getZ(ii));
+                    }
+                }
+
+                // Build cranium mesh
+                if (craniumVerts.length > 0) {
+                    var cGeo = new THREE.BufferGeometry();
+                    cGeo.setAttribute('position', new THREE.Float32BufferAttribute(craniumVerts, 3));
+                    cGeo.setAttribute('normal', new THREE.Float32BufferAttribute(craniumNorms, 3));
+                    var cMat = mat.clone();
+                    var cMesh = new THREE.Mesh(cGeo, cMat);
+                    cMesh.position.set(-CX, -CY, -CZ); // center it
+                    headGroup.add(cMesh);
+                    allMeshes.push(cMesh);
+                }
+
+                // Build jaw mesh — offset to hinge, then we'll pivot the parent group
+                if (jawVerts.length > 0) {
+                    // Shift jaw vertices so the hinge point is at local origin
+                    for (var vi = 0; vi < jawVerts.length; vi += 3) {
+                        jawVerts[vi]   -= HINGE_X;
+                        jawVerts[vi+1] -= HINGE_Y;
+                        jawVerts[vi+2] -= HINGE_Z;
+                    }
+                    var jGeo = new THREE.BufferGeometry();
+                    jGeo.setAttribute('position', new THREE.Float32BufferAttribute(jawVerts, 3));
+                    jGeo.setAttribute('normal', new THREE.Float32BufferAttribute(jawNorms, 3));
+                    var jMat = mat.clone();
+                    var jMesh = new THREE.Mesh(jGeo, jMat);
+
+                    // jawGroup sits at the hinge point (in centered model space)
+                    if (!jawGroup) {
+                        jawGroup = new THREE.Group();
+                        jawGroup.position.set(HINGE_X - CX, HINGE_Y - CY, HINGE_Z - CZ);
+                        headGroup.add(jawGroup);
+                    }
+                    jawGroup.add(jMesh);
+                    allMeshes.push(jMesh);
+                    jawMeshes.push(jMesh);
+                }
+            }
+
             headGroup.scale.set(scale, scale, scale);
             headGroup.rotation.set(0, 0, 0);
             modelLoaded = true;
+
+            console.log('[3D] Jaw split complete. Cranium meshes:', allMeshes.length - jawMeshes.length,
+                        'Jaw meshes:', jawMeshes.length,
+                        'Jaw verts:', jawMeshes.reduce(function(s,m){return s+m.geometry.attributes.position.count;},0));
 
             if (wakeRequested) {
                 setOpacity(1); mood = 'annoyed';
@@ -499,10 +591,11 @@
                 allMeshes[i].material.specular.set(c.r, c.g, c.b);
             }
             // Update lights too
-            dl1.color.copy(hex);
-            dl2.color.copy(hex).multiplyScalar(0.8);
-            pl.color.copy(hex);
-            ul.color.copy(hex).multiplyScalar(0.4);
+            var lightColor = new THREE.Color(c.r, c.g, c.b);
+            dl1.color.copy(lightColor);
+            dl2.color.copy(lightColor).multiplyScalar(0.8);
+            pl.color.copy(lightColor);
+            ul.color.copy(lightColor).multiplyScalar(0.4);
 
             // Update status text color
             if (statusEl && mood !== 'dormant') {

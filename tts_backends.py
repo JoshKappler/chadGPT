@@ -156,7 +156,7 @@ def add_echo(audio_path: str, delay_ms: int = 80, decay: float = 0.35, taps: int
         logger.warning(f"[TTS] Echo failed (non-fatal): {e}")
 
 
-def trim_silence(audio_path: str, threshold: float = 0.01, min_silence_ms: int = 300):
+def trim_silence(audio_path: str, threshold: float = 0.005, min_silence_ms: int = 500):
     """Trim trailing silence from audio so playback ends promptly."""
     try:
         import numpy as np
@@ -350,8 +350,10 @@ class Qwen3TTSBackend:
             speed = voice_config.get("speed", 1.0)
             # Scale max_tokens to input length. Model is 12Hz (12 tokens/sec of audio).
             # ~15 chars/sec of speech → len/15 seconds → *12 tokens/sec
-            # 2x headroom to avoid cutoffs (trim_silence removes excess later)
-            estimated_tokens = max(256, int(len(text) / 15 * 12 * 2.0 / max(speed, 0.5)))
+            # 3x headroom to avoid cutoffs — Qwen3 with emotion/pitch needs
+            # significantly more tokens than raw char count suggests.
+            # trim_silence strips excess silence afterward so overshoot is free.
+            estimated_tokens = max(512, int(len(text) / 15 * 12 * 3.0 / max(speed, 0.5)))
 
             # Optional Qwen3-specific params
             cfg_scale = voice_config.get("cfg_scale", None)
