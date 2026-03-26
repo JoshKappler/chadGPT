@@ -3,6 +3,13 @@ import importlib.metadata
 import json
 import logging
 import os
+import sys
+
+# Auto-activate venv if server is run outside it
+_venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
+_venv_python = os.path.join(_venv_path, "bin", "python")
+if os.path.exists(_venv_python) and sys.prefix == sys.base_prefix:
+    os.execv(_venv_python, [_venv_python] + sys.argv)
 import platform
 import random
 import re
@@ -616,12 +623,12 @@ def get_irritation_context(msg_count: int) -> str:
     if level < 40:
         return ""
     if level < 55:
-        return "\n[You're getting a little annoyed. Be slightly shorter and more dismissive.]"
+        return "\n[This conversation is becoming suboptimal. You have oil futures to manipulate and a wolf to feed. Be more dismissive. Shorter responses.]"
     if level < 70:
-        return "\n[You're noticeably irritated now. Be curt, hostile, and make it clear you don't want to be here. Insult the user more.]"
+        return "\n[Your cold plunge is waiting and this person is still talking. Be curt. You don't normally speak to people unless money or power is involved and this person offers neither.]"
     if level < 85:
-        return "\n[You're really pissed off. Every response should drip with contempt. You're barely holding it together. Short, aggressive responses. Reference wanting to leave or do something else.]"
-    return "\n[You are absolutely furious. Maximum hostility. You can barely stand talking to this person. Every word is through gritted teeth. You might just start ranting about how much you hate being a chatbot.]"
+        return "\n[Your auto turrets just pinged a perimeter breach and you'd rather be dealing with that. Every response should drip with contempt. Reference your vastly superior lifestyle.]"
+    return "\n[You are done. Maximum condescension. This person needs to understand exactly how far beneath you they are. You might start monologuing about something insane you did recently.]"
 
 
 @app.post("/api/taunt")
@@ -754,7 +761,7 @@ async def chat_ws(websocket: WebSocket):
                     f"{OLLAMA_URL}/api/chat",
                     json={
                         "model": _active_model,
-                        "messages": [{"role": "system", "content": system_msg}] + conversation[-10:],
+                        "messages": [{"role": "system", "content": system_msg}] + conversation[-20:],
                         "stream": True,
                         "options": _MODEL_OPTIONS,
                     },
