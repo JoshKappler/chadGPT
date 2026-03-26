@@ -348,19 +348,13 @@ class Qwen3TTSBackend:
             speaker = voice_config.get("qwen3_speaker", "aiden")
             temp = voice_config.get("temperature", 0.9)
             speed = voice_config.get("speed", 1.0)
-            # Scale max_tokens to input length. Model is 12Hz (12 tokens/sec of audio).
-            # ~15 chars/sec of speech → len/15 seconds → *12 tokens/sec
-            # 3x headroom to avoid cutoffs — Qwen3 with emotion/pitch needs
-            # significantly more tokens than raw char count suggests.
-            # trim_silence strips excess silence afterward so overshoot is free.
-            estimated_tokens = max(512, int(len(text) / 15 * 12 * 3.0 / max(speed, 0.5)))
 
             # Optional Qwen3-specific params
             cfg_scale = voice_config.get("cfg_scale", None)
             ref_audio = voice_config.get("ref_audio", "").strip() or None
             ref_text = voice_config.get("ref_text", "").strip() or None
 
-            logger.info(f"[TTS:Qwen3] max_tokens={estimated_tokens} for {len(text)} chars, speed={speed}, cfg={cfg_scale}")
+            logger.info(f"[TTS:Qwen3] {len(text)} chars, speed={speed}, cfg={cfg_scale}")
             t0 = time.time()
 
             gen_kwargs = dict(
@@ -375,7 +369,6 @@ class Qwen3TTSBackend:
                 verbose=False,
                 play=False,
                 temperature=temp,
-                max_tokens=estimated_tokens,
             )
             if cfg_scale is not None:
                 gen_kwargs["cfg_scale"] = cfg_scale

@@ -392,11 +392,9 @@
                     var speechBob = amp * Math.sin(t * 10) * 0.02;
                     headGroup.rotation.y = baseY + smoothX * MOUSE_SENSITIVITY_X + speechBob;
                     headGroup.rotation.x = baseX + smoothY * MOUSE_SENSITIVITY_Y;
-                    // Jaw rotation: pivot open proportional to amplitude
-                    // Negative X rotation tilts the chin downward (opens mouth)
-                    // in our flipped coordinate system
+                    // Jaw rotation: positive X tilts chin down (opens mouth)
                     if (jawGroup) {
-                        var jawOpen = amp * -0.15; // radians — ~8.5 degrees at full amp
+                        var jawOpen = amp * 0.12; // ~7 degrees at full amplitude
                         jawGroup.rotation.x = jawOpen;
                     }
                     // Emissive pulse tied to voice amplitude — subtle glow
@@ -463,21 +461,23 @@
             var scale = 3.0 / MAX_DIM;  // ~0.015
 
             // Jaw split in FLIPPED coords.
-            // Original: nose Y≈-42 → flipped Y≈42, mouth Y≈-59 → flipped Y≈59
-            // Mouth gap: original Y=-95..-70 → flipped Y=70..95
-            // Jaw (chin/neck) is BELOW the mouth: flipped Y < 70
-            // Cranium (upper face, forehead, hair) is ABOVE: flipped Y >= 70
-            var JAW_SPLIT_Y = 70;
+            // Mouth gap: original Y=-76..-62 → flipped Y=62..76
+            // Upper lip edge at original Y=-77 → flipped Y=77
+            // Split at the upper lip edge so the jaw includes lower lip + chin + neck
+            // Jaw = flipped Y < 76, Cranium = flipped Y >= 76
+            var JAW_SPLIT_Y = 76;
 
-            // Jaw hinge in FLIPPED coords — at TMJ joint level (mouth line, mid-depth)
-            var HINGE_X = FCX;
-            var HINGE_Y = JAW_SPLIT_Y;  // at the split line
-            var HINGE_Z = FCZ;           // center depth
+            // Jaw hinge in FLIPPED coords — at TMJ joint (ear level, behind mouth)
+            // The hinge should be at the jaw joint near the ears, slightly behind
+            // the face surface. Mouth gap center Z≈40 in original = flipped Z≈-40.
+            var HINGE_X = FCX;            // horizontally centered
+            var HINGE_Y = JAW_SPLIT_Y;   // at the split line
+            var HINGE_Z = FCZ + 20;      // slightly forward of center (toward face)
 
             var mat = new THREE.MeshPhongMaterial({
-                color: 0x007722, emissive: 0x001100, specular: 0x88ffaa,
-                shininess: 200, transparent: false, opacity: 1.0, side: THREE.DoubleSide,
-                reflectivity: 1.0
+                color: 0x00aa2a, emissive: 0x002200, specular: 0x66ff88,
+                shininess: 120, transparent: true, opacity: 0.9, side: THREE.DoubleSide,
+                reflectivity: 0.8
             });
 
             // Collect all geometries from the model

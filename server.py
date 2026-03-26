@@ -57,7 +57,7 @@ _MODEL_OPTIONS = {
     "top_p": 0.9,
     "top_k": 40,
     "repeat_penalty": 1.2,
-    "num_predict": 512,
+    "num_predict": -1,  # no limit — let the model finish naturally
 }
 IMAGE_DIR = Path(tempfile.mkdtemp(prefix="chadgpt_images_"))
 
@@ -155,26 +155,7 @@ def init_tts_qwen3():
 
 def synthesize_speech(text: str, output_path: str, angry: bool = False) -> bool:
     """Generate speech with the configured engine."""
-    # Truncate long text — TTS models struggle with very long inputs
-    # Keep first ~600 chars, cut at sentence boundary
-    if len(text) > 500:
-        cut = text[:500]
-        # Try to find a sentence boundary
-        for sep in ['. ', '! ', '? ', '.\n', '!\n', '?\n']:
-            idx = cut.rfind(sep)
-            if idx > 80:
-                text = cut[:idx + 1]  # include the punctuation mark
-                break
-        else:
-            # Try comma or semicolon
-            for sep in [', ', '; ', ' — ', ' - ']:
-                idx = cut.rfind(sep)
-                if idx > 80:
-                    text = cut[:idx + 1]
-                    break
-            else:
-                text = cut
-        logger.info(f"TTS: truncated to {len(text)} chars")
+    # No text truncation — let TTS handle the full response
     # Strip *actions*, markdown, emojis, and special chars that confuse TTS
     text = re.sub(r'\*[^*]+\*', '', text)  # remove *action text*
     text = text.replace('#', '').replace('`', '').replace('_', ' ')
@@ -361,9 +342,16 @@ async def no_cache_middleware(request, call_next):
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+# Cache buster: timestamp set once at server start, changes on every restart
+_CACHE_BUSTER = str(int(time.time()))
+
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+    from fastapi.responses import HTMLResponse
+    html = Path("static/index.html").read_text()
+    # Replace version params so browser fetches fresh assets after restart
+    html = re.sub(r'\?v=\d+', f'?v={_CACHE_BUSTER}', html)
+    return HTMLResponse(content=html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/test3d")
@@ -1090,7 +1078,7 @@ async def voice_preview(request: Request):
     custom_text = data.get("text", "").strip() if data else ""
 
     if custom_text:
-        text = custom_text[:300]  # cap length
+        text = custom_text
     else:
         previews = [
             "Bro you're testing my voice right now? I have better things to do.",
