@@ -1,18 +1,18 @@
 {
   "engine": "qwen3",
   "voice": "am_michael",
-  "speed": 1.25,
+  "speed": 0.5,
   "angry_speed": 0.95,
   "lang_code": "a",
-  "chaos": 60,
+  "chaos": 50,
   "custom_instruct": "growling, angry, rumbling, rough, gruff, evil, roaring, scratchy",
   "qwen3_speaker": "ryan",
   "pitch_shift": 4,
-  "temperature": 0.9,
+  "temperature": 0.75,
   "echo_delay": 60,
   "echo_decay": 0.35,
   "echo_taps": 2,
-  "cfg_scale": 2.5,
+  "cfg_scale": 4.0,
   "ref_audio": "",
   "ref_text": ""
 }

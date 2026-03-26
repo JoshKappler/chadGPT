@@ -57,7 +57,8 @@ _MODEL_OPTIONS = {
     "top_p": 0.9,
     "top_k": 40,
     "repeat_penalty": 1.2,
-    "num_predict": -1,  # no limit — let the model finish naturally
+    "num_predict": -1,   # no limit — let the model finish naturally
+    "num_ctx": 8192,     # generous context window so long conversations aren't truncated
 }
 IMAGE_DIR = Path(tempfile.mkdtemp(prefix="chadgpt_images_"))
 
@@ -633,21 +634,13 @@ async def get_taunt(request: Request):
     tier = min(taunt_count, len(IDLE_TAUNTS) - 1)
     taunt = random.choice(IDLE_TAUNTS[tier])
 
-    # Generate TTS with boosted temperature for wilder vocalizations
+    # Generate TTS using saved user config — no overrides
     audio_id = str(uuid.uuid4())
     audio_path = str(AUDIO_DIR / f"{audio_id}.wav")
     loop = asyncio.get_running_loop()
-    angry = taunt_count >= 1  # angry from first repeat onwards
-    # Temporarily boost temperature + irritation for unhinged vocal output
-    orig_temp = voice_config.get("temperature", 0.6)
-    orig_chaos = voice_config.get("chaos", 50)
-    voice_config["temperature"] = min(1.8, orig_temp + 0.4 + taunt_count * 0.2)
-    voice_config["chaos"] = min(100, orig_chaos + 20 + taunt_count * 10)
     ok = await loop.run_in_executor(
-        None, synthesize_speech, taunt, audio_path, angry
+        None, synthesize_speech, taunt, audio_path, False
     )
-    voice_config["temperature"] = orig_temp
-    voice_config["chaos"] = orig_chaos
 
     return {
         "message": taunt,
@@ -802,12 +795,10 @@ async def chat_ws(websocket: WebSocket):
                 audio_id = str(uuid.uuid4())
                 audio_path = str(AUDIO_DIR / f"{audio_id}.wav")
                 t_tts_start = time.time()
-                auto_irritation = get_irritation_for_msg_count(msg_count)
-                angry = auto_irritation >= 65
-                logger.info(f"Chat: starting TTS ({len(full_response)} chars, irritation={auto_irritation}, angry={angry})...")
+                logger.info(f"Chat: starting TTS ({len(full_response)} chars)...")
                 loop = asyncio.get_running_loop()
                 ok = await loop.run_in_executor(
-                    None, synthesize_speech, full_response, audio_path, angry
+                    None, synthesize_speech, full_response, audio_path, False
                 )
                 t_tts = time.time() - t_tts_start
                 t_total = time.time() - t_start
