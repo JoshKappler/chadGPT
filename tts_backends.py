@@ -184,8 +184,8 @@ def change_speed(audio_path: str, speed: float = 1.0):
             pass
 
 
-def trim_silence(audio_path: str, threshold: float = 0.005, min_silence_ms: int = 500):
-    """Trim trailing silence from audio so playback ends promptly."""
+def trim_trailing_silence(audio_path: str, threshold: float = 0.01, keep_ms: int = 80):
+    """Trim trailing silence from audio, keeping a small tail for natural spacing."""
     try:
         import numpy as np
         import soundfile as sf
@@ -193,20 +193,18 @@ def trim_silence(audio_path: str, threshold: float = 0.005, min_silence_ms: int 
         data, sr = sf.read(audio_path)
         if len(data) == 0:
             return
+        abs_data = np.max(np.abs(data), axis=-1) if data.ndim > 1 else np.abs(data)
         # Find last sample above threshold
-        abs_data = np.abs(data) if data.ndim == 1 else np.max(np.abs(data), axis=1)
-        above = np.where(abs_data > threshold)[0]
-        if len(above) == 0:
-            return  # all silence
-        last_sound = above[-1]
-        # Keep a small tail of silence (min_silence_ms)
-        tail_samples = int(sr * min_silence_ms / 1000)
-        end = min(len(data), last_sound + tail_samples)
-        if end < len(data) - sr * 0.1:  # only trim if >100ms would be removed
-            trimmed = data[:end]
-            sf.write(audio_path, trimmed.astype(np.float32), sr)
-            removed_ms = (len(data) - end) / sr * 1000
-            logger.info(f"[TTS] Trimmed {removed_ms:.0f}ms trailing silence")
+        loud = np.where(abs_data > threshold)[0]
+        if len(loud) == 0:
+            return
+        last_loud = loud[-1]
+        keep_samples = int(sr * keep_ms / 1000)
+        end = min(last_loud + keep_samples, len(data))
+        if end < len(data) - sr // 10:  # only trim if >100ms of silence
+            sf.write(audio_path, data[:end].astype(np.float32), sr)
+            trimmed_ms = (len(data) - end) * 1000 // sr
+            logger.info(f"[TTS] Trimmed {trimmed_ms}ms trailing silence")
     except Exception as e:
         logger.warning(f"[TTS] Trim silence failed (non-fatal): {e}")
 
@@ -220,9 +218,10 @@ def boost_volume(audio_path: str, target_peak: float = 0.98):
         data, sr = sf.read(audio_path)
         if len(data) == 0:
             return
+        data = np.array(data, dtype=np.float32)  # ensure writable copy
         peak = np.max(np.abs(data))
-        if peak < 0.01:
-            return  # silence, don't amplify noise
+        if peak < 0.001:
+            return  # truly empty, nothing to amplify
 
         # Step 1: Soft-knee compression — reduce dynamic range so quiet parts are louder
         threshold = 0.3
@@ -322,7 +321,6 @@ class KokoroBackend:
             if echo_taps > 0 and echo_decay > 0:
                 add_echo(output_path, delay_ms=echo_delay, decay=echo_decay, taps=echo_taps)
 
-            trim_silence(output_path)
             boost_volume(output_path)
             return True
         except Exception as e:
@@ -400,45 +398,49 @@ class Qwen3TTSBackend:
             all_audio = []
             t0 = time.time()
 
-            for ci, chunk in enumerate(chunks):
-                if not chunk.strip():
-                    continue
-                chunk_dir = tempfile.mkdtemp(prefix="qwen3tts_")
-                # Generous max_tokens per chunk — 12Hz * 30sec = 360 tokens for a sentence,
-                # but use 4000 to be safe with slow/emotional speech
-                gen_kwargs = dict(
-                    text=chunk,
-                    model=self.model,
-                    instruct=instruct,
-                    voice=speaker,
-                    output_path=chunk_dir,
-                    file_prefix="chad",
-                    audio_format="wav",
-                    verbose=False,
-                    play=False,
-                    temperature=temp,
-                    max_tokens=4000,
-                )
-                if cfg_scale is not None:
-                    gen_kwargs["cfg_scale"] = cfg_scale
-                if ref_audio:
-                    gen_kwargs["ref_audio"] = ref_audio
-                if ref_text:
-                    gen_kwargs["ref_text"] = ref_text
+            # Hold tts_lock for the entire synthesis to prevent concurrent GPU access
+            with tts_lock:
+                for ci, chunk in enumerate(chunks):
+                    if not chunk.strip():
+                        continue
+                    chunk_dir = tempfile.mkdtemp(prefix="qwen3tts_")
+                    # Generous max_tokens per chunk — 12Hz * 30sec = 360 tokens for a sentence,
+                    # but use 4000 to be safe with slow/emotional speech
+                    gen_kwargs = dict(
+                        text=chunk,
+                        model=self.model,
+                        instruct=instruct,
+                        voice=speaker,
+                        output_path=chunk_dir,
+                        file_prefix="chad",
+                        audio_format="wav",
+                        verbose=False,
+                        play=False,
+                        temperature=temp,
+                        max_tokens=4000,
+                    )
+                    if cfg_scale:
+                        gen_kwargs["cfg_scale"] = cfg_scale
+                    if ref_audio:
+                        gen_kwargs["ref_audio"] = ref_audio
+                    if ref_text:
+                        gen_kwargs["ref_text"] = ref_text
 
-                try:
-                    with tts_lock, suppress_stdout():
-                        generate_audio(**gen_kwargs)
-                    chunk_path = Path(chunk_dir)
-                    wavs = sorted(chunk_path.glob("*.wav"))
-                    if wavs:
-                        data, sr = sf.read(str(wavs[0]))
-                        all_audio.append(data)
-                        logger.info(f"[TTS:Qwen3] chunk {ci+1}/{len(chunks)}: {len(chunk)} chars → {len(data)/sr:.1f}s audio")
-                except Exception as e:
-                    logger.warning(f"[TTS:Qwen3] chunk {ci+1} failed: {e}")
-                finally:
-                    shutil.rmtree(chunk_dir, ignore_errors=True)
+                    try:
+                        with suppress_stdout():
+                            generate_audio(**gen_kwargs)
+                        chunk_path = Path(chunk_dir)
+                        wavs = sorted(chunk_path.glob("*.wav"))
+                        if wavs:
+                            data, sr = sf.read(str(wavs[0]))
+                            all_audio.append(data)
+                            logger.info(f"[TTS:Qwen3] chunk {ci+1}/{len(chunks)}: {len(chunk)} chars → {len(data)/sr:.1f}s audio")
+                        else:
+                            logger.warning(f"[TTS:Qwen3] chunk {ci+1}/{len(chunks)}: no WAV produced")
+                    except Exception as e:
+                        logger.warning(f"[TTS:Qwen3] chunk {ci+1} failed: {e}")
+                    finally:
+                        shutil.rmtree(chunk_dir, ignore_errors=True)
 
             t_gen = time.time() - t0
             logger.info(f"[TTS:Qwen3] all chunks generated in {t_gen:.1f}s")
@@ -449,7 +451,7 @@ class Qwen3TTSBackend:
 
             # Concatenate all chunks
             combined = np.concatenate(all_audio)
-            sf.write(output_path, combined.astype(np.float32), sr)
+            sf.write(output_path, np.asarray(combined, dtype=np.float32), sr)
 
             # Post-processing pipeline
             # 1. Speed adjustment (Qwen3 ignores the speed param, so do it here)
@@ -468,14 +470,135 @@ class Qwen3TTSBackend:
             if echo_taps > 0 and echo_decay > 0:
                 add_echo(output_path, delay_ms=echo_delay, decay=echo_decay, taps=echo_taps)
 
-            # 4. Trim + boost
-            trim_silence(output_path)
+            # 4. Boost volume
             boost_volume(output_path)
             wav_size = Path(output_path).stat().st_size
             logger.info(f"[TTS:Qwen3] output: {wav_size/1024:.0f}KB WAV ({len(chunks)} chunks, {t_gen:.1f}s gen)")
             return True
         except Exception as e:
             logger.error(f"[TTS:Qwen3] synth failed: {e}")
+            return False
+
+
+    def synthesize_sentence(self, text: str, output_path: str, voice_config: dict, angry: bool = False) -> bool:
+        """Synthesize a single sentence with post-processing.
+        Used by the streaming TTS pipeline to process sentences as they arrive.
+        Long text is split at clause boundaries to prevent the 0.6B model from
+        degenerating on long inputs."""
+        if not self.ready:
+            return False
+        try:
+            import re as _re
+            import shutil
+            import tempfile
+
+            import numpy as np
+            import soundfile as sf
+
+            text = text.strip()
+            if not text:
+                return False
+
+            irritation = voice_config.get("chaos", 30)
+            custom_instruct = voice_config.get("custom_instruct", "").strip()
+            instruct = custom_instruct if custom_instruct else get_instruct(irritation, angry)
+
+            from mlx_audio.tts.generate import generate_audio
+            speaker = voice_config.get("qwen3_speaker", "aiden")
+            temp = voice_config.get("temperature", 0.9)
+            speed = voice_config.get("speed", 1.0)
+
+            cfg_scale = voice_config.get("cfg_scale", None)
+            ref_audio = voice_config.get("ref_audio", "").strip() or None
+            ref_text = voice_config.get("ref_text", "").strip() or None
+
+            # Split long text into chunks at clause boundaries to prevent
+            # the 0.6B model from cutting off or degenerating
+            MAX_CHUNK_CHARS = 200
+            if len(text) > MAX_CHUNK_CHARS:
+                # Split at commas, semicolons, colons, dashes, or sentence-enders
+                parts = _re.split(r'(?<=[,;:\-—.!?])\s+', text)
+                chunks = []
+                for p in parts:
+                    if chunks and len(chunks[-1]) + len(p) + 1 <= MAX_CHUNK_CHARS:
+                        chunks[-1] += ' ' + p
+                    else:
+                        chunks.append(p)
+            else:
+                chunks = [text]
+
+            logger.info(f"[TTS:Qwen3] sentence synth: {len(text)} chars → {len(chunks)} chunk(s)")
+
+            all_audio = []
+            sr = 24000
+
+            # Hold tts_lock for the entire sentence to prevent concurrent GPU access
+            # between chunks (Metal can crash if two generate_audio calls interleave)
+            with tts_lock:
+                for ci, chunk in enumerate(chunks):
+                    if not chunk.strip():
+                        continue
+                    chunk_dir = tempfile.mkdtemp(prefix="qwen3tts_")
+                    gen_kwargs = dict(
+                        text=chunk,
+                        model=self.model,
+                        instruct=instruct,
+                        voice=speaker,
+                        output_path=chunk_dir,
+                        file_prefix="chad",
+                        audio_format="wav",
+                        verbose=False,
+                        play=False,
+                        temperature=temp,
+                        max_tokens=4000,
+                    )
+                    if cfg_scale:
+                        gen_kwargs["cfg_scale"] = cfg_scale
+                    if ref_audio:
+                        gen_kwargs["ref_audio"] = ref_audio
+                    if ref_text:
+                        gen_kwargs["ref_text"] = ref_text
+
+                    try:
+                        with suppress_stdout():
+                            generate_audio(**gen_kwargs)
+                        chunk_path = Path(chunk_dir)
+                        wavs = sorted(chunk_path.glob("*.wav"))
+                        if wavs:
+                            data, chunk_sr = sf.read(str(wavs[0]))
+                            sr = chunk_sr
+                            all_audio.append(data)
+                            logger.info(f"[TTS:Qwen3] sentence chunk {ci+1}/{len(chunks)}: {len(chunk)} chars → {len(data)/sr:.1f}s")
+                        else:
+                            logger.warning(f"[TTS:Qwen3] sentence chunk {ci+1}/{len(chunks)}: no WAV produced")
+                    except Exception as e:
+                        logger.warning(f"[TTS:Qwen3] sentence chunk {ci+1}/{len(chunks)} failed: {e}")
+                    finally:
+                        shutil.rmtree(chunk_dir, ignore_errors=True)
+
+            if not all_audio:
+                return False
+
+            combined = np.concatenate(all_audio) if len(all_audio) > 1 else all_audio[0]
+            sf.write(output_path, np.asarray(combined, dtype=np.float32), sr)
+
+            # Post-processing pipeline (same as full synthesize)
+            if abs(speed - 1.0) >= 0.05:
+                change_speed(output_path, speed)
+            pitch = voice_config.get("pitch_shift", PITCH_SHIFT_SEMITONES)
+            if pitch != 0:
+                deepen_voice(output_path, semitones=pitch)
+            echo_delay = voice_config.get("echo_delay", 80)
+            echo_decay = voice_config.get("echo_decay", 0.35)
+            echo_taps = voice_config.get("echo_taps", 3)
+            if echo_taps > 0 and echo_decay > 0:
+                add_echo(output_path, delay_ms=echo_delay, decay=echo_decay, taps=echo_taps)
+            boost_volume(output_path)
+
+            logger.info(f"[TTS:Qwen3] sentence done: {len(text)} chars → {Path(output_path).stat().st_size/1024:.0f}KB")
+            return True
+        except Exception as e:
+            logger.error(f"[TTS:Qwen3] sentence synth failed: {e}")
             return False
 
 

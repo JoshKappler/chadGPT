@@ -182,51 +182,119 @@ function unlockAudio() {
 }
 
 // Mouth sync — simulated amplitude from audio playback
-// (Using a real AnalyserNode requires routing through a separate AudioContext
-// which kills playback. This approach is visually convincing without touching audio.)
-let _lastAudioTime = 0;
-let _audioPlaying = false;
+// Shared AudioContext + MediaElementSource for real audio analysis.
+// call.js and chad3d.js both tap into these globals.
+var sharedAudioCtx = null;
+var sharedChadSource = null;   // MediaElementSourceNode (one per element, ever)
+var _ampConnectedEl = null;
 
-// Global function — called from the Three.js animation loop in index.html
-function getVoiceAmplitude() {
+function _ensureSharedAudio() {
     var el = document.getElementById('chad-audio');
-    if (!el || el.paused || el.ended) { _audioPlaying = false; return 0; }
-    // Detect if audio is actually advancing
-    if (el.currentTime !== _lastAudioTime) {
-        _lastAudioTime = el.currentTime;
-        _audioPlaying = true;
+    if (!el) return null;
+    if (!sharedAudioCtx) {
+        sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
     }
-    if (!_audioPlaying) return 0;
-    // Generate a convincing speech-like amplitude pattern:
-    // - Fast oscillation (jaw open/close at ~8-12Hz, natural speech rate)
-    // - Slower modulation (word/phrase rhythm at ~2-3Hz)
-    // - Random variation (so it doesn't look mechanical)
-    var t = performance.now() * 0.001;
-    var jaw = Math.abs(Math.sin(t * 10.5)) * 0.6;         // fast jaw flap
-    var phrase = Math.abs(Math.sin(t * 2.7)) * 0.3 + 0.1; // phrase rhythm
-    var noise = Math.random() * 0.15;                       // random variation
-    // Occasional brief pauses (natural speech has gaps)
-    var gap = Math.sin(t * 1.3) > 0.7 ? 0.1 : 1.0;
-    return Math.min(1.0, (jaw + phrase + noise) * gap);
+    if (_ampConnectedEl !== el) {
+        try {
+            sharedChadSource = sharedAudioCtx.createMediaElementSource(el);
+            sharedChadSource.connect(sharedAudioCtx.destination);
+            _ampConnectedEl = el;
+        } catch (e) {
+            _ampConnectedEl = el;
+        }
+    }
+    if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume();
+    return el;
 }
 
+// Lip-sync analyser (plugged into the shared source)
+var _ampAnalyser = null;
+var _ampDataArray = null;
+
+function getVoiceAmplitude() {
+    var el = _ensureSharedAudio();
+    if (!el || el.paused || el.ended) return 0;
+
+    // Lazy-create analyser and attach to shared source
+    if (!_ampAnalyser && sharedAudioCtx && sharedChadSource) {
+        _ampAnalyser = sharedAudioCtx.createAnalyser();
+        _ampAnalyser.fftSize = 256;
+        _ampAnalyser.smoothingTimeConstant = 0.75;
+        sharedChadSource.connect(_ampAnalyser);
+        _ampDataArray = new Uint8Array(_ampAnalyser.frequencyBinCount);
+    }
+    if (!_ampAnalyser) return 0;
+
+    // Read time-domain waveform and compute RMS
+    _ampAnalyser.getByteTimeDomainData(_ampDataArray);
+    var sum = 0;
+    for (var i = 0; i < _ampDataArray.length; i++) {
+        var v = (_ampDataArray[i] - 128) / 128;
+        sum += v * v;
+    }
+    var rms = Math.sqrt(sum / _ampDataArray.length);
+    // Scale so typical speech lands around 0.3–0.7
+    return Math.min(1.0, rms * 4);
+}
+
+// Audio queue — plays sentence clips sequentially
+let _audioQueue = [];
+let _audioPlaying_queue = false;
+
 function playAudio(url) {
+    _audioQueue.push(url);
+    if (!_audioPlaying_queue) _playNext();
+}
+
+function _playNext() {
     const el = document.getElementById('chad-audio');
-    if (!el) return;
-    el.volume = 1.0;  // Max volume — Chad speaks LOUD
-    _lastAudioTime = 0;
-    _audioPlaying = false;
+    if (!el || _audioQueue.length === 0) {
+        _audioPlaying_queue = false;
+        if (chadAvatar) chadAvatar.stopTalking();
+        _idleTaunting = false;
+        startIdleTimer();
+        // Notify call system that Chad finished speaking
+        if (typeof callState !== 'undefined' && callState === 'connected') {
+            setTimeout(function() { if (typeof callStartListening === 'function') callStartListening(); }, 600);
+        }
+        return;
+    }
+    _audioPlaying_queue = true;
+    const url = _audioQueue.shift();
+    // Guard against double-advance: both onerror and play().catch can fire for
+    // the same clip, which previously skipped queue items.
+    let _advanced = false;
+    function _advance() {
+        if (_advanced) return;
+        _advanced = true;
+        _playNext();
+    }
+    el.volume = 1.0;
     el.onplay = () => { if (chadAvatar) chadAvatar.startTalking(); };
-    el.onended = () => { if (chadAvatar) chadAvatar.stopTalking(); _idleTaunting = false; startIdleTimer(); };
-    el.onpause = () => { if (chadAvatar) chadAvatar.stopTalking(); };
-    el.onerror = () => { if (chadAvatar) chadAvatar.stopTalking(); _idleTaunting = false; startIdleTimer(); };
+    el.onended = () => { _advance(); };
+    // Don't stop talking on pause — only stop when queue is truly empty (handled above)
+    el.onpause = null;
+    el.onerror = (e) => { console.warn('[TTS] audio error:', url, e); _advance(); };
     el.src = url;
-    el.play().catch(() => { if (chadAvatar) chadAvatar.stopTalking(); });
+    // Wait for enough data to play before calling play()
+    el.oncanplaythrough = () => {
+        el.oncanplaythrough = null;
+        el.play().catch(err => { console.warn('[TTS] play failed:', url, err); _advance(); });
+    };
+    // Fallback: if canplaythrough doesn't fire within 5s, try playing anyway
+    setTimeout(() => {
+        if (!_advanced && el.src.includes(url.split('/').pop())) {
+            el.oncanplaythrough = null;
+            el.play().catch(err => { console.warn('[TTS] play timeout fallback failed:', err); _advance(); });
+        }
+    }, 5000);
 }
 
 function stopAudio() {
+    _audioQueue = [];
+    _audioPlaying_queue = false;
     const el = document.getElementById('chad-audio');
-    if (el) { el.pause(); el.currentTime = 0; }
+    if (el) { el.oncanplaythrough = null; el.onended = null; el.onerror = null; el.pause(); el.currentTime = 0; }
     if (chadAvatar) chadAvatar.stopTalking();
 }
 
@@ -367,6 +435,8 @@ function bootComplete() {
         document.getElementById('send-btn').disabled = false;
         document.getElementById('shutup-btn').disabled = false;
         document.getElementById('vision-btn').disabled = false;
+        if (document.getElementById('mic-btn')) document.getElementById('mic-btn').disabled = false;
+        if (document.getElementById('call-btn')) document.getElementById('call-btn').disabled = false;
         document.getElementById('chat-input').focus();
 
         if (chadAvatar) chadAvatar.wake();
@@ -644,6 +714,60 @@ function handleKeyDown(event) {
     }
 }
 
+// ============ VOICE INPUT (Web Speech API) ============
+
+var _recognition = null;
+var _recognizing = false;
+
+function toggleVoiceInput() {
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+        console.warn('Speech recognition not supported');
+        return;
+    }
+    if (_recognizing) {
+        _recognition.stop();
+        return;
+    }
+    if (!_recognition) {
+        var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        _recognition = new SpeechRecognition();
+        _recognition.continuous = false;
+        _recognition.interimResults = true;
+        _recognition.lang = 'en-US';
+
+        _recognition.onstart = function() {
+            _recognizing = true;
+            var btn = document.getElementById('mic-btn');
+            if (btn) { btn.classList.add('mic-active'); btn.textContent = '\u25CF'; }
+        };
+        _recognition.onresult = function(event) {
+            var transcript = '';
+            for (var i = event.resultIndex; i < event.results.length; i++) {
+                transcript += event.results[i][0].transcript;
+            }
+            var input = document.getElementById('chat-input');
+            if (input) input.value = transcript;
+            // Auto-send on final result
+            if (event.results[event.results.length - 1].isFinal) {
+                _recognition.stop();
+                if (transcript.trim()) sendMessage();
+            }
+        };
+        _recognition.onend = function() {
+            _recognizing = false;
+            var btn = document.getElementById('mic-btn');
+            if (btn) { btn.classList.remove('mic-active'); btn.textContent = '\u25C9'; }
+        };
+        _recognition.onerror = function(event) {
+            console.warn('Speech recognition error:', event.error);
+            _recognizing = false;
+            var btn = document.getElementById('mic-btn');
+            if (btn) { btn.classList.remove('mic-active'); btn.textContent = '\u25C9'; }
+        };
+    }
+    _recognition.start();
+}
+
 function addMessage(type, content) {
     const c = document.getElementById('chat-messages');
     const m = document.createElement('div');
@@ -757,6 +881,8 @@ const IDLE_DELAY_REPEAT = 75000;      // 75 seconds between subsequent taunts
 
 function _isChadBusy() {
     if (isStreaming || _idleTaunting) return true;
+    // Still busy if audio queue has items or is actively playing
+    if (_audioPlaying_queue) return true;
     const el = document.getElementById('chad-audio');
     return el && !el.paused && !el.ended && el.currentTime > 0;
 }
@@ -881,6 +1007,9 @@ async function powerOff() {
     document.getElementById('send-btn').disabled = true;
     document.getElementById('shutup-btn').disabled = true;
     document.getElementById('vision-btn').disabled = true;
+    if (document.getElementById('mic-btn')) document.getElementById('mic-btn').disabled = true;
+    if (document.getElementById('call-btn')) document.getElementById('call-btn').disabled = true;
+    if (typeof endCall === 'function' && callState !== 'idle') endCall();
     if (visionOpen) toggleVision();
     document.getElementById('boot-terminal').classList.remove('visible');
     document.getElementById('chat-messages').classList.remove('visible');

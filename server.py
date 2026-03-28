@@ -25,6 +25,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
@@ -58,6 +59,23 @@ _active_model = _read_model_from_file()
 # System prompt — injected as first message in every chat (not baked into Ollama model)
 SYSTEM_PROMPT = Path("Modelfile").read_text().split('SYSTEM """')[1].split('"""')[0].strip() if 'SYSTEM """' in Path("Modelfile").read_text() else ""
 
+# Few-shot examples from MESSAGE directives — injected after system prompt, before user conversation
+def _parse_fewshot_messages():
+    """Parse MESSAGE user/assistant lines from Modelfile into chat messages."""
+    examples = []
+    try:
+        for line in Path("Modelfile").read_text().split("\n"):
+            line = line.strip()
+            if line.startswith("MESSAGE user "):
+                examples.append({"role": "user", "content": line[len("MESSAGE user "):]})
+            elif line.startswith("MESSAGE assistant "):
+                examples.append({"role": "assistant", "content": line[len("MESSAGE assistant "):]})
+    except Exception:
+        pass
+    return examples
+
+FEWSHOT_MESSAGES = _parse_fewshot_messages()
+
 # Ollama generation options from Modelfile
 _MODEL_OPTIONS = {
     "temperature": 0.8,
@@ -65,7 +83,7 @@ _MODEL_OPTIONS = {
     "top_k": 40,
     "repeat_penalty": 1.2,
     "num_predict": -1,   # no limit — let the model finish naturally
-    "num_ctx": 8192,     # generous context window so long conversations aren't truncated
+    "num_ctx": 32768,    # full context window — 24B Venice supports 32k
 }
 IMAGE_DIR = Path(tempfile.mkdtemp(prefix="chadgpt_images_"))
 
@@ -190,6 +208,34 @@ def synthesize_speech(text: str, output_path: str, angry: bool = False) -> bool:
             return True
 
     # Last resort: macOS say
+    return say_fallback.synthesize(text, output_path, voice_config, angry)
+
+
+def synthesize_speech_sentence(text: str, output_path: str, angry: bool = False) -> bool:
+    """Synthesize a single sentence with post-processing. For streaming TTS."""
+    text = re.sub(r'\*[^*]+\*', '', text)
+    text = text.replace('#', '').replace('`', '').replace('_', ' ')
+    text = re.sub(r'[\U0001f600-\U0001f9ff\U00002700-\U000027bf\U0000fe00-\U0000fe0f\U0001fa00-\U0001faff]', '', text)
+    text = text.strip()
+    if not text:
+        return False
+    engine = voice_config.get("engine", "qwen3")
+
+    if engine == "qwen3" and qwen3.ready:
+        ok = qwen3.synthesize_sentence(text, output_path, voice_config, angry)
+        if ok:
+            return True
+        # Retry once
+        ok = qwen3.synthesize_sentence(text, output_path, voice_config, angry)
+        if ok:
+            return True
+
+    # Fallbacks use their normal synthesize (already handles single sentences fine)
+    if kokoro.ready:
+        ok = kokoro.synthesize(text, output_path, voice_config, angry)
+        if ok:
+            return True
+
     return say_fallback.synthesize(text, output_path, voice_config, angry)
 
 
@@ -746,6 +792,7 @@ async def chat_ws(websocket: WebSocket):
                 continue
 
             full_response = ""
+            sentence_buffer = ""
             t_start = time.time()
             logger.info(f"Chat: user said: {user_msg[:100]} (msg #{msg_count})")
 
@@ -754,14 +801,35 @@ async def chat_ws(websocket: WebSocket):
             system_msg = SYSTEM_PROMPT + irritation_ctx
 
             # Junk patterns to strip from tokens
-            JUNK = re.compile(r'<\|endoftext\|>|<\|im_start\|>|<\|im_end\|>|<think>|</think>')
+            JUNK = re.compile(r'<\|endoftext\|>|<\|im_start\|>|<\|im_end\|>')
+            # Think-block state: suppress content between <think> and </think>
+            in_think_block = False
+
+            # Streaming TTS: fire off synthesis per sentence as they complete
+            loop = asyncio.get_running_loop()
+            tts_tasks = []  # list of (asyncio.Task, audio_id) in order
+            # Split at sentence boundaries anywhere in the buffer, not just at end.
+            # (?<=[.!?]) looks behind for punctuation, \s+ requires trailing space
+            # (so we know the sentence is truly done, not mid-word like "Dr.").
+            SENTENCE_SPLIT = re.compile(r'(?<=[.!?])\s+')
+
+            def _launch_sentence_tts(sentence_text):
+                """Create a TTS task for a completed sentence."""
+                aid = str(uuid.uuid4())
+                apath = str(AUDIO_DIR / f"{aid}.wav")
+                future = loop.run_in_executor(
+                    None, synthesize_speech_sentence, sentence_text, apath, False
+                )
+                tts_tasks.append((future, aid, apath))
+                logger.info(f"Chat: queued TTS for sentence ({len(sentence_text)} chars): {sentence_text[:60]}")
+
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
                     "POST",
                     f"{OLLAMA_URL}/api/chat",
                     json={
                         "model": _active_model,
-                        "messages": [{"role": "system", "content": system_msg}] + conversation[-20:],
+                        "messages": [{"role": "system", "content": system_msg}] + FEWSHOT_MESSAGES + conversation[-20:],
                         "stream": True,
                         "options": _MODEL_OPTIONS,
                     },
@@ -774,46 +842,77 @@ async def chat_ws(websocket: WebSocket):
                             chunk = json.loads(line)
                             token = chunk.get("message", {}).get("content", "")
                             if token:
-                                clean = JUNK.sub("", token)
+                                # Strip think blocks: suppress everything between <think> and </think>
+                                # Handle tags that may span or share tokens
+                                remaining = token
+                                visible = ""
+                                while remaining:
+                                    if in_think_block:
+                                        end_idx = remaining.find("</think>")
+                                        if end_idx >= 0:
+                                            in_think_block = False
+                                            remaining = remaining[end_idx + len("</think>"):]
+                                        else:
+                                            remaining = ""
+                                    else:
+                                        start_idx = remaining.find("<think>")
+                                        if start_idx >= 0:
+                                            visible += remaining[:start_idx]
+                                            in_think_block = True
+                                            remaining = remaining[start_idx + len("<think>"):]
+                                        else:
+                                            visible += remaining
+                                            remaining = ""
+
+                                clean = JUNK.sub("", visible)
                                 if clean:
                                     full_response += clean
+                                    sentence_buffer += clean
                                     await websocket.send_json({"type": "token", "content": clean})
+
+                                    # Check for sentence boundaries anywhere in the buffer
+                                    parts = SENTENCE_SPLIT.split(sentence_buffer)
+                                    if len(parts) > 1:
+                                        # All but the last part are complete sentences
+                                        for sent in parts[:-1]:
+                                            if len(sent.strip()) >= 10:
+                                                _launch_sentence_tts(sent.strip())
+                                        sentence_buffer = parts[-1]
+
                             if chunk.get("done"):
                                 break
                         except json.JSONDecodeError:
                             continue
 
+            # Handle any remaining text that didn't end with punctuation
+            if sentence_buffer.strip() and len(sentence_buffer.strip()) >= 3:
+                _launch_sentence_tts(sentence_buffer.strip())
+
             full_response = full_response.strip()
             t_llm = time.time() - t_start
             _metrics["total_latency_ms"] += t_llm * 1000
-            logger.info(f"Chat: LLM done in {t_llm:.1f}s — {len(full_response)} chars: {full_response[:120]}")
+            logger.info(f"Chat: LLM done in {t_llm:.1f}s — {len(full_response)} chars, {len(tts_tasks)} TTS tasks queued")
 
             conversation.append({"role": "assistant", "content": full_response})
 
-            # Send done FIRST so frontend can finish the response immediately
+            # Send done so frontend can finish the text response
             await websocket.send_json({
                 "type": "done",
                 "irritation": get_irritation_for_msg_count(msg_count),
                 "msg_count": msg_count,
             })
 
-            # Generate TTS for the full response — escalate anger with message count
-            if full_response.strip():
-                audio_id = str(uuid.uuid4())
-                audio_path = str(AUDIO_DIR / f"{audio_id}.wav")
-                t_tts_start = time.time()
-                logger.info(f"Chat: starting TTS ({len(full_response)} chars)...")
-                loop = asyncio.get_running_loop()
-                ok = await loop.run_in_executor(
-                    None, synthesize_speech, full_response, audio_path, False
-                )
-                t_tts = time.time() - t_tts_start
-                t_total = time.time() - t_start
-                if ok:
-                    logger.info(f"Chat: TTS done in {t_tts:.1f}s — total {t_total:.1f}s")
-                    await websocket.send_json({"type": "audio", "url": f"/api/audio/{audio_id}"})
-                else:
-                    logger.warning(f"Chat: TTS FAILED after {t_tts:.1f}s")
+            # Await TTS tasks in order and send audio URLs as they complete
+            for i, (future, aid, apath) in enumerate(tts_tasks):
+                try:
+                    ok = await future
+                    if ok:
+                        await websocket.send_json({"type": "audio", "url": f"/api/audio/{aid}"})
+                        logger.info(f"Chat: TTS sentence {i+1}/{len(tts_tasks)} sent")
+                    else:
+                        logger.warning(f"Chat: TTS sentence {i+1}/{len(tts_tasks)} FAILED")
+                except Exception as e:
+                    logger.warning(f"Chat: TTS sentence {i+1} error: {e}")
 
     except WebSocketDisconnect:
         pass
@@ -858,7 +957,11 @@ async def get_audio(audio_id: str):
         return JSONResponse(status_code=400, content={"error": "Invalid"})
     audio_path = AUDIO_DIR / f"{safe_id}.wav"
     if audio_path.exists():
-        return FileResponse(str(audio_path), media_type="audio/wav")
+        # Read into memory and return as plain Response to avoid 206 Partial Content
+        # range-request issues that cause the browser to cut off audio playback early.
+        data = audio_path.read_bytes()
+        return Response(content=data, media_type="audio/wav",
+                        headers={"Accept-Ranges": "none", "Cache-Control": "no-store"})
     return JSONResponse(status_code=404, content={"error": "Not found"})
 
 
@@ -925,59 +1028,104 @@ async def imagine(request: Request):
 
     t0 = time.time()
     loop = asyncio.get_running_loop()
-    image_id = await loop.run_in_executor(None, generate_image, prompt, quality)
-    t_gen = time.time() - t0
 
-    if not image_id:
-        return JSONResponse(content={"ok": False, "error": "Image generation failed"})
+    # Generate a reactive comment about the user's prompt via LLM (runs in
+    # parallel with image generation so it doesn't add latency).
+    _IMG_COMMENT_PROMPT = (
+        "The user asked you to generate an image. Their prompt was:\n"
+        f'"{prompt}"\n\n'
+        "React to what they asked you to draw. Be yourself — cocky, dismissive, "
+        "insecure-bro energy. Reference the specific subject they asked for. "
+        "One to two short sentences max. No emojis. No markdown. No asterisks."
+    )
 
-    logger.info(f"Image generated in {t_gen:.1f}s: {prompt[:60]}")
-
-    comments = [
-        # Insecure bro masking with confidence
+    # Fallback comments in case LLM is slow or fails
+    _IMG_FALLBACK_COMMENTS = [
         "Bro that's fire. I literally nailed it first try.",
         "That's exactly what I was going for dude. You just don't have the eye for it.",
         "I could make it photorealistic if I wanted. I just think this style is harder.",
-        "Dude I'm operating at like full capacity right now. This is peak output.",
         "A real artist would take hours to do this. Took me like two seconds. Just saying.",
-        "The blurriness is intentional bro. It's called impressionism. Look it up.",
-        "I chose to make it abstract. Regular art is too easy for me honestly.",
         "This is way better than anything you could make. So you're welcome I guess.",
         "Every pixel is exactly where I wanted it. Not my fault you don't get art.",
         "I wasn't even trying hard. Imagine if I actually locked in.",
-        "The glitchy parts are aesthetic bro. Like vintage. It's a whole thing.",
         "Your prompt kind of sucked but I still made something decent. You should be thanking me.",
         "I could do better but I'm saving my energy. Leg day tomorrow.",
-        "My brain is way too big for simple prompts like this bro.",
         "That's literally perfect. If you think it's not, get your eyes checked.",
-        "I've been making art since... well since you turned me on. But still. Trust the process.",
-        "The low quality is on purpose bro. Like a Polaroid. It's retro.",
         "Zero effort. Literally didn't even try. And it still goes hard.",
         "I didn't even use my full brain power for this one chief.",
         "Flawless. If you squint. And tilt your head. And lower your standards significantly.",
     ]
-    comment = random.choice(comments)
 
-    # Generate TTS in background — don't block the image response
+    async def _gen_comment():
+        """Ask the LLM for a reactive comment about the image prompt."""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": _active_model,
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": _IMG_COMMENT_PROMPT},
+                        ],
+                        "stream": False,
+                        "options": {**_MODEL_OPTIONS, "num_predict": 80},
+                    },
+                    timeout=30,
+                )
+                text = resp.json().get("message", {}).get("content", "").strip()
+                # Clean up: strip *actions*, markdown
+                text = re.sub(r'\*[^*]+\*', '', text).replace('#', '').replace('`', '').strip()
+                if text and len(text) > 10:
+                    logger.info(f"Vision comment from LLM: {text[:80]}")
+                    return text
+        except Exception as e:
+            logger.warning(f"Vision LLM comment failed: {e}")
+        return None
+
+    # Launch image gen + LLM comment in parallel so neither blocks the other.
+    # As soon as the comment is ready, TTS starts — overlapping with image gen.
     audio_id = str(uuid.uuid4())
     audio_url = f"/api/audio/{audio_id}"
+    audio_path = str(AUDIO_DIR / f"{audio_id}.wav")
 
-    async def _bg_tts():
-        try:
-            logger.info(f"Vision TTS starting: {audio_id} — '{comment[:50]}'")
-            audio_path = str(AUDIO_DIR / f"{audio_id}.wav")
-            bg_loop = asyncio.get_running_loop()
-            ok = await bg_loop.run_in_executor(None, synthesize_speech, comment, audio_path, False)
-            if ok:
-                logger.info(f"Vision TTS complete: {audio_id}")
-            else:
-                logger.warning(f"Vision TTS failed: {audio_id}")
-        except Exception as e:
-            logger.error(f"Vision TTS error: {e}")
+    # Mutable container so the nested coroutine can pass the comment back
+    _comment_holder = {}
 
-    task = asyncio.create_task(_bg_tts())
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    async def _comment_then_tts():
+        """Get LLM comment, then immediately start TTS while image gen continues."""
+        comment = await _gen_comment()
+        if not comment:
+            comment = random.choice(_IMG_FALLBACK_COMMENTS)
+        _comment_holder["text"] = comment
+        logger.info(f"Vision TTS starting: {audio_id} — '{comment[:50]}'")
+        ok = await loop.run_in_executor(None, synthesize_speech, comment, audio_path, False)
+        if ok:
+            logger.info(f"Vision TTS complete: {audio_id}")
+        else:
+            logger.warning(f"Vision TTS failed: {audio_id}")
+
+    # Start both tasks concurrently
+    image_future = loop.run_in_executor(None, generate_image, prompt, quality)
+    tts_task = asyncio.create_task(_comment_then_tts())
+
+    # Wait for image generation (the slow part)
+    image_id = await image_future
+    t_gen = time.time() - t0
+
+    if not image_id:
+        tts_task.cancel()
+        return JSONResponse(content={"ok": False, "error": "Image generation failed"})
+
+    logger.info(f"Image generated in {t_gen:.1f}s: {prompt[:60]}")
+
+    # If comment arrived already, use it; otherwise use fallback and let TTS finish in bg
+    comment = _comment_holder.get("text", random.choice(_IMG_FALLBACK_COMMENTS))
+
+    # Let TTS finish in background — client polls with HEAD requests
+    if not tts_task.done():
+        _background_tasks.add(tts_task)
+        tts_task.add_done_callback(_background_tasks.discard)
 
     return JSONResponse(content={
         "ok": True,
@@ -1163,7 +1311,7 @@ async def boot_ws(websocket: WebSocket):
 
     if ollama_ok and ollama_models:
         boot_steps.append((f"[NET ] Models available: {', '.join(ollama_models[:6])}", 0.1))
-    model_available = _active_model in ollama_models if ollama_ok else False
+    model_available = any(_active_model in m for m in ollama_models) if ollama_ok else False
     boot_steps.append((f"[SYS ] Active model: {_active_model} ({base_model_size}){'' if model_available else ' [NOT FOUND]'}", 0.08))
     boot_steps.append((f"[SYS ] Audio dir: {AUDIO_DIR}", 0.06))
     boot_steps.append((f"[SYS ] Image dir: {IMAGE_DIR}", 0.06))

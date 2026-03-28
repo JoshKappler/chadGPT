@@ -548,6 +548,8 @@ body {
     position: relative;
     line-height: 1.5;
     font-size: 14px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
 }
 
 .message.user {
@@ -753,6 +755,36 @@ body {
 #send-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+}
+
+#mic-btn {
+    background: var(--green-dark);
+    color: var(--green);
+    border: 1px solid var(--green-dim);
+    width: 46px;
+    height: 46px;
+    font-size: 18px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+#mic-btn:hover:not(:disabled) {
+    background: var(--green-dim);
+    color: var(--bg);
+    box-shadow: 0 0 15px var(--green-glow);
+}
+#mic-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+#mic-btn.mic-active {
+    background: #330000;
+    color: #ff3333;
+    border-color: #ff3333;
+    box-shadow: 0 0 15px rgba(255, 0, 0, 0.4);
+    animation: pulse-glow 0.8s infinite alternate;
 }
 
 /* Avatar Section */
@@ -1693,4 +1725,292 @@ body::after {
     100% {
         transform: scale(1);
     }
+}
+
+/* ============ CALL OVERLAY ============ */
+
+#call-overlay {
+    display: none;
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 9000;
+    background: rgba(0, 5, 0, 0.95);
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+}
+
+#call-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+#call-header {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+#call-secure {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--green-dim);
+    letter-spacing: 3px;
+    margin-bottom: 8px;
+    animation: call-flicker 4s infinite;
+}
+
+@keyframes call-flicker {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 0.8; }
+    92% { opacity: 0.5; }
+    93% { opacity: 0.1; }
+    94% { opacity: 0.6; }
+}
+
+#call-status {
+    font-family: 'VT323', 'Share Tech Mono', monospace;
+    font-size: 22px;
+    color: var(--green);
+    letter-spacing: 4px;
+    text-shadow: 0 0 10px var(--green-glow), 0 0 20px rgba(0, 255, 65, 0.2);
+}
+
+#call-status.connected {
+    color: #00ff41;
+    animation: pulse-glow 2s ease-in-out infinite;
+}
+
+#call-canvas {
+    width: 340px;
+    height: 340px;
+    margin: 10px 0;
+}
+
+#call-timer {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 28px;
+    color: var(--green);
+    letter-spacing: 6px;
+    margin: 10px 0;
+    text-shadow: 0 0 8px var(--green-glow);
+}
+
+#call-transcript {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    color: var(--green-dim);
+    min-height: 20px;
+    max-width: 400px;
+    text-align: center;
+    margin: 8px 0 16px 0;
+    opacity: 0.7;
+}
+
+#call-hangup {
+    background: #1a0000;
+    color: #ff3333;
+    border: 2px solid #ff3333;
+    padding: 14px 40px;
+    font-family: 'VT323', 'Share Tech Mono', monospace;
+    font-size: 18px;
+    letter-spacing: 3px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-radius: 4px;
+}
+
+#call-hangup:hover {
+    background: #330000;
+    box-shadow: 0 0 20px rgba(255, 0, 0, 0.4), 0 0 40px rgba(255, 0, 0, 0.1);
+    text-shadow: 0 0 10px rgba(255, 0, 0, 0.6);
+    transform: scale(1.05);
+}
+
+#call-hangup:active {
+    transform: scale(0.95);
+}
+
+#call-hangup-icon {
+    font-size: 22px;
+    transform: rotate(135deg);
+    display: inline-block;
+}
+
+#call-fine-print {
+    position: absolute;
+    bottom: 20px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 8px;
+    color: var(--green-dark);
+    letter-spacing: 1px;
+    opacity: 0.4;
+}
+
+/* ---- Rotary Dial Screen ---- */
+
+#dial-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+#dial-header {
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+#dial-title {
+    font-family: 'VT323', 'Share Tech Mono', monospace;
+    font-size: 20px;
+    color: var(--green);
+    letter-spacing: 4px;
+    text-shadow: 0 0 10px var(--green-glow);
+}
+
+#dial-subtitle {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: var(--green-dim);
+    letter-spacing: 3px;
+    margin-top: 4px;
+}
+
+#dial-number-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 12px 0;
+}
+
+#dial-number-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    color: var(--green-dim);
+    letter-spacing: 2px;
+}
+
+#dial-number-display {
+    font-family: 'VT323', 'Share Tech Mono', monospace;
+    font-size: 36px;
+    color: var(--green);
+    letter-spacing: 6px;
+    text-shadow: 0 0 8px var(--green-glow);
+    min-width: 240px;
+    text-align: center;
+}
+
+#rotary-canvas {
+    width: 400px;
+    height: 400px;
+    margin: 5px 0;
+    cursor: default;
+}
+
+#dial-chad-number {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    color: var(--green-dim);
+    margin: 10px 0 4px 0;
+    letter-spacing: 1px;
+}
+
+#dial-chad-number .dial-highlight {
+    color: var(--green);
+    font-weight: bold;
+    text-shadow: 0 0 6px var(--green-glow);
+}
+
+#dial-instructions {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: var(--green-dark);
+    letter-spacing: 2px;
+    margin-bottom: 16px;
+    opacity: 0.6;
+}
+
+#dial-buttons {
+    display: flex;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+#dial-cancel {
+    background: #1a0000;
+    color: #ff3333;
+    border: 1px solid #ff3333;
+    padding: 10px 30px;
+    font-family: 'VT323', 'Share Tech Mono', monospace;
+    font-size: 16px;
+    letter-spacing: 3px;
+    cursor: pointer;
+    transition: all 0.2s;
+    border-radius: 3px;
+}
+
+#dial-cancel:hover {
+    background: #330000;
+    box-shadow: 0 0 15px rgba(255, 0, 0, 0.3);
+}
+
+#dial-call {
+    background: #001a00;
+    color: #00ff41;
+    border: 1px solid #00ff41;
+    font-family: 'VT323', 'Share Tech Mono', monospace;
+    font-size: 16px;
+    padding: 10px 32px;
+    cursor: pointer;
+    letter-spacing: 4px;
+    text-shadow: 0 0 8px rgba(0, 255, 65, 0.5);
+    transition: all 0.2s;
+    border-radius: 3px;
+    animation: call-btn-pulse 1.5s ease-in-out infinite;
+}
+
+#dial-call:hover {
+    background: #003300;
+    box-shadow: 0 0 15px rgba(0, 255, 65, 0.4);
+}
+
+@keyframes call-btn-pulse {
+    0%, 100% { box-shadow: 0 0 5px rgba(0, 255, 65, 0.2); }
+    50% { box-shadow: 0 0 15px rgba(0, 255, 65, 0.4); }
+}
+
+/* Call button in input area */
+#call-btn {
+    background: var(--green-dark);
+    color: var(--green);
+    border: 1px solid var(--green-dim);
+    width: 52px;
+    height: 46px;
+    font-size: 20px;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    letter-spacing: 0;
+}
+#call-btn:hover:not(:disabled) {
+    background: var(--green-dim);
+    color: var(--bg);
+    box-shadow: 0 0 15px var(--green-glow);
+}
+#call-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
 }

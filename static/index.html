@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
     <title>ChadGPT</title>
-    <link rel="stylesheet" href="/static/style.css?v=70">
+    <link rel="stylesheet" href="/static/style.css?v=78">
     <script src="/static/three.min.js"></script>
-    <script src="/static/GLTFLoader.js"></script>
 </head>
 <body>
 <div id="crt-screen">
@@ -72,10 +73,12 @@
                 </div>
                 <div id="chat-messages"></div>
                 <div id="input-area">
+                    <button id="call-btn" onclick="toggleCall()" disabled title="Call Chad">☎</button>
                     <button id="shutup-btn" onclick="shutUp()" disabled>SHUT UP</button>
                     <div id="input-wrapper">
                         <textarea id="chat-input" placeholder="Talk to Chad (he won't like it)..." disabled
                             onkeydown="handleKeyDown(event)"></textarea>
+                        <button id="mic-btn" onclick="toggleVoiceInput()" disabled title="Voice input">&#9673;</button>
                         <button id="send-btn" onclick="sendMessage()" disabled>▶</button>
                     </div>
                 </div>
@@ -294,300 +297,51 @@
             </div>
         </div>
     </div>
+    <!-- CALL OVERLAY -->
+    <div id="call-overlay">
+        <!-- ROTARY DIAL SCREEN -->
+        <div id="dial-screen">
+            <div id="dial-header">
+                <div id="dial-title">C H A D G P T &nbsp; T E L E C O M</div>
+                <div id="dial-subtitle">ROTARY DIRECT-DIAL SERVICE</div>
+            </div>
+            <div id="dial-number-row">
+                <div id="dial-number-label">DIAL:</div>
+                <div id="dial-number-display">___-____</div>
+            </div>
+            <canvas id="rotary-canvas"></canvas>
+            <div id="dial-chad-number">CHAD's LINE: <span class="dial-highlight">666-2423</span></div>
+            <div id="dial-instructions">CLICK A DIGIT HOLE AND DRAG CLOCKWISE TO THE RED STOP</div>
+            <div id="dial-buttons">
+                <button id="dial-cancel" onclick="endCall()">HANG UP</button>
+                <button id="dial-call" onclick="transitionToRinging()" style="display:none">CALL</button>
+            </div>
+        </div>
+
+        <!-- CONNECTED CALL SCREEN -->
+        <div id="call-screen" style="display:none">
+            <div id="call-header">
+                <div id="call-secure">▓▓ SECURE LINE // ENCRYPTED ▓▓</div>
+                <div id="call-status">R I N G I N G . . .</div>
+            </div>
+            <canvas id="call-canvas"></canvas>
+            <div id="call-timer">--:--</div>
+            <div id="call-transcript"></div>
+            <button id="call-hangup" onclick="endCall()">
+                <span id="call-hangup-icon">▬</span>
+                HANG UP
+            </button>
+            <div id="call-fine-print">* CHADGPT IS NOT RESPONSIBLE FOR ANY ADVICE GIVEN DURING THIS CALL *</div>
+        </div>
+    </div>
+
     <div id="dim-overlay"></div>
 
-    <script src="/static/effects.js?v=70"></script>
-    <script src="/static/audio.js?v=70"></script>
-    <script src="/static/app.js?v=70"></script>
-
-    <!--
-        3D HEAD: Inline script. No external file. No iframe.
-        Identical approach to test_head.html which WORKS.
-        Model transform values hardcoded from GLB binary analysis.
-        NO bounding box computation. NO animation before model loads.
-    -->
-    <script>
-    var chadAvatar = null;
-    (function() {
-        var container = document.getElementById('three-container');
-        var statusEl = document.getElementById('avatar-status');
-        if (!container || typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') return;
-
-        // --- Measure container ---
-        var rect = container.getBoundingClientRect();
-        var W = Math.max(rect.width | 0, 200);
-        var H = Math.max(rect.height | 0, 200);
-
-        // --- Scene + Camera (same as working test_head.html) ---
-        var scene = new THREE.Scene();
-        var camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 500);
-        camera.position.set(0, 0.2, 7.0);
-        camera.lookAt(0, 0, 0);
-
-        // --- Renderer (alpha:false is critical) ---
-        var renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
-        renderer.setSize(W, H);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        renderer.setClearColor(0x050505, 1);
-        renderer.domElement.style.display = 'block';
-        renderer.domElement.style.width = '100%';
-        renderer.domElement.style.height = '100%';
-        container.appendChild(renderer.domElement);
-
-        // --- Lights (dramatic, deep shadows) ---
-        // Very dim ambient — most of the face should be in shadow
-        scene.add(new THREE.AmbientLight(0x000a00, 0.3));
-        // Key light — harsh, from upper-left, creates strong shadow on right side
-        var dl1 = new THREE.DirectionalLight(0x00ff41, 1.8);
-        dl1.position.set(-4, 4, 5); scene.add(dl1);
-        // Fill light — very dim, just enough to hint at the shadow side
-        var dl2 = new THREE.DirectionalLight(0x003311, 0.4);
-        dl2.position.set(4, 0, 3); scene.add(dl2);
-        // Rim/back light — bright edge highlight from behind
-        var pl = new THREE.PointLight(0x00ff41, 2.0, 40);
-        pl.position.set(1, 2, -7); scene.add(pl);
-        // Under-light — faint eerie upward glow
-        var ul = new THREE.PointLight(0x002200, 0.6, 20);
-        ul.position.set(0, -5, 2); scene.add(ul);
-
-        // --- Group that holds the head (animated) ---
-        var headGroup = new THREE.Group();
-        scene.add(headGroup);
-
-        // --- State ---
-        var allMeshes = [];
-        var mood = 'dormant';
-        var modelLoaded = false;
-        var wakeRequested = false;
-        var _smoothAmp = 0;
-
-        // --- Mouse tracking ---
-        var mouseX = 0, mouseY = 0;     // normalized -1..1
-        var smoothX = 0, smoothY = 0;   // smoothed values
-        var MOUSE_SENSITIVITY_X = 0.4;  // max rotation in radians
-        var MOUSE_SENSITIVITY_Y = 0.15;
-        var MOUSE_SMOOTH = 0.04;        // lerp factor per frame (lower = slower/smoother)
-
-        document.addEventListener('mousemove', function(e) {
-            mouseX = (e.clientX / window.innerWidth) * 2 - 1;   // -1 (left) to 1 (right)
-            mouseY = (e.clientY / window.innerHeight) * 2 - 1;  // -1 (top) to 1 (bottom)
-        });
-
-        function setOpacity(f) {
-            f = Math.max(f, 0.1);
-            var ic = typeof getIrritationColor === 'function' ? getIrritationColor(irritationLevel || 0) : {r:0, g:0.2, b:0};
-            for (var i = 0; i < allMeshes.length; i++) {
-                // Always dark/shadowy. Dormant is very dim, awake is only slightly brighter.
-                var brightness = 0.25 + 0.25 * f;  // ranges 0.275 (dormant) to 0.5 (awake)
-                allMeshes[i].material.color.setRGB(ic.r * brightness, ic.g * brightness, ic.b * brightness);
-                // Emissive: subtle glow that increases when awake
-                allMeshes[i].material.emissive.setRGB(ic.r * 0.08 * f, ic.g * 0.08 * f, ic.b * 0.08 * f);
-            }
-        }
-
-        // --- Render loop: does NOT touch headGroup until model is loaded ---
-        (function animate() {
-            requestAnimationFrame(animate);
-            if (modelLoaded) {
-                var t = Date.now() * 0.001;
-
-                // Smooth mouse tracking (lerp toward target)
-                smoothX += (mouseX - smoothX) * MOUSE_SMOOTH;
-                smoothY += (mouseY - smoothY) * MOUSE_SMOOTH;
-
-                if (mood === 'talking') {
-                    // Get voice amplitude for speech animation
-                    var rawAmp = (typeof getVoiceAmplitude === 'function') ? getVoiceAmplitude() : 0;
-                    _smoothAmp += (rawAmp - _smoothAmp) * 0.35;
-                    var amp = _smoothAmp;
-                    // Mouse tracking + sway
-                    var baseY = Math.sin(t * 0.3) * 0.05;
-                    var baseX = Math.sin(t * 0.2) * 0.01;
-                    // Animated head movement during speech:
-                    // - Chin tilts down with amplitude (simulates jaw opening)
-                    // - Micro head bobs synced to speech rhythm
-                    // - Side-to-side bob for emphasis
-                    var jawTilt = amp * 0.12;  // chin drops when loud
-                    var speechBobY = amp * Math.sin(t * 8) * 0.03;
-                    var speechBobX = amp * Math.sin(t * 12) * 0.015;
-                    headGroup.rotation.y = baseY + smoothX * MOUSE_SENSITIVITY_X + speechBobY;
-                    headGroup.rotation.x = baseX + smoothY * MOUSE_SENSITIVITY_Y + jawTilt + speechBobX;
-                    // Strong emissive pulse synced to voice — head glows when speaking
-                    var pulse = 0.3 + amp * 0.7;
-                    var ic = getIrritationColor(irritationLevel);
-                    for (var i = 0; i < allMeshes.length; i++) {
-                        allMeshes[i].material.emissive.setRGB(
-                            ic.r * 0.15 * pulse,
-                            ic.g * 0.15 * pulse,
-                            ic.b * 0.15 * pulse
-                        );
-                    }
-                } else if (mood !== 'dormant') {
-                    // Awake: mouse tracking + gentle idle sway
-                    _smoothAmp = 0;
-                    var baseY = Math.sin(t * 0.3) * 0.05;
-                    var baseX = Math.sin(t * 0.2) * 0.01;
-                    headGroup.rotation.y = baseY + smoothX * MOUSE_SENSITIVITY_X;
-                    headGroup.rotation.x = baseX + smoothY * MOUSE_SENSITIVITY_Y;
-                } else {
-                    // Dormant: slow nod, minimal mouse response
-                    _smoothAmp = 0;
-                    if (jawGroup) jawGroup.rotation.x = 0;
-                    var baseY = Math.sin(t * 0.1) * 0.15;
-                    headGroup.rotation.y = baseY + smoothX * 0.08;
-                    headGroup.rotation.x = smoothY * 0.04;
-                }
-            }
-            renderer.render(scene, camera);
-        })();
-
-        // --- Resize ---
-        function onResize() {
-            var r = container.getBoundingClientRect();
-            if (r.width > 10 && r.height > 10) {
-                camera.aspect = r.width / r.height;
-                camera.updateProjectionMatrix();
-                renderer.setSize(r.width, r.height);
-            }
-        }
-        window.addEventListener('resize', onResize);
-        setTimeout(onResize, 200);
-        setTimeout(onResize, 1000);
-
-        // --- Load model ---
-        if (statusEl) statusEl.textContent = '[ LOADING... ]';
-        new THREE.GLTFLoader().load('/static/head.glb', function(gltf) {
-            var model = gltf.scene;
-
-            // GLB vertex bounds: X: -0.02..133.18, Y: -200.01..-0.03, Z: 0.01..138.39
-            // Model orientation: Y=-200=top of head, Y=0=neck, Z=0=face, Z=138=back
-            // Fix orientation with rotation instead of vertex manipulation
-            var CX = 66.582, CY = -100.022, CZ = 69.198, MAX_DIM = 199.985;
-            var scale = 3.0 / MAX_DIM;  // ~0.015
-
-            var mat = new THREE.MeshPhongMaterial({
-                color: 0x00aa2a, emissive: 0x002200, specular: 0x66ff88,
-                shininess: 120, transparent: true, opacity: 0.9, side: THREE.DoubleSide,
-                reflectivity: 0.8
-            });
-            model.traverse(function(n) {
-                if (n.isMesh) {
-                    n.geometry.computeVertexNormals();
-                    n.material = mat.clone();
-                    allMeshes.push(n);
-                }
-            });
-            if (allMeshes.length === 0) return;
-
-            // Rotate 180° around X to fix orientation
-            // (flips both Y and Z: top of head goes up, face turns toward camera)
-            // Three.js applies T*R*S, so after X rotation by π, model center
-            // (CX, CY, CZ) becomes (CX, -CY, -CZ). Position must cancel that.
-            model.rotation.x = Math.PI;
-            model.position.set(-CX, CY, CZ);
-
-            headGroup.add(model);
-            headGroup.scale.set(scale, scale, scale);
-            headGroup.rotation.set(0, 0, 0);
-            modelLoaded = true;
-
-            console.log('[3D] Model loaded, single mesh, rotation-based orientation fix.');
-
-            if (wakeRequested) {
-                setOpacity(1); mood = 'annoyed';
-                if (statusEl) { statusEl.textContent = '[ ONLINE ]'; statusEl.style.color = '#00ff41'; }
-            } else {
-                setOpacity(0.3);
-                if (statusEl) statusEl.textContent = '[ READY ]';
-            }
-        }, null, function(err) {
-            if (statusEl) statusEl.textContent = '[ LOAD ERROR ]';
-        });
-
-        // --- Irritation color system ---
-        var irritationLevel = 0;  // 0-100
-
-        function getIrritationColor(level) {
-            // 0-40: green (0x00aa2a), 40-70: shift to amber, 70-100: shift to red
-            var r, g, b;
-            if (level < 40) {
-                r = 0; g = 0.67; b = 0.16;  // green
-            } else if (level < 70) {
-                var t = (level - 40) / 30;
-                r = t * 0.8; g = 0.67 - t * 0.2; b = 0.16 * (1 - t);
-            } else {
-                var t = (level - 70) / 30;
-                r = 0.8 + t * 0.2; g = 0.47 - t * 0.35; b = 0;
-            }
-            return { r: r, g: g, b: b };
-        }
-
-        function applyIrritationColor() {
-            var c = getIrritationColor(irritationLevel);
-            // Keep the dark/shadowy look — apply color at reduced brightness
-            var dark = new THREE.Color(c.r * 0.5, c.g * 0.5, c.b * 0.5);
-            for (var i = 0; i < allMeshes.length; i++) {
-                allMeshes[i].material.color.copy(dark);
-                allMeshes[i].material.specular.set(c.r, c.g, c.b);
-            }
-            // Update lights too
-            var lightColor = new THREE.Color(c.r, c.g, c.b);
-            dl1.color.copy(lightColor);
-            dl2.color.copy(lightColor).multiplyScalar(0.8);
-            pl.color.copy(lightColor);
-            ul.color.copy(lightColor).multiplyScalar(0.4);
-
-            // Update status text color
-            if (statusEl && mood !== 'dormant') {
-                var cssColor = 'rgb(' + Math.round(c.r*255) + ',' + Math.round(c.g*255) + ',' + Math.round(c.b*255) + ')';
-                statusEl.style.color = cssColor;
-            }
-        }
-
-        // --- Public API (used by app.js) ---
-        chadAvatar = {
-            wake: function() {
-                wakeRequested = true; mood = 'annoyed';
-                if (!modelLoaded) return;
-                var p = 0;
-                (function fadeIn() {
-                    p += 0.03;
-                    if (p >= 1) {
-                        setOpacity(1);
-                        if (statusEl) { statusEl.textContent = '[ ONLINE ]'; statusEl.style.color = '#00ff41'; }
-                        return;
-                    }
-                    setOpacity(p); requestAnimationFrame(fadeIn);
-                })();
-            },
-            sleep: function() {
-                mood = 'dormant'; wakeRequested = false; setOpacity(0.3);
-                irritationLevel = 0; applyIrritationColor();
-                if (statusEl) { statusEl.textContent = '[ DORMANT ]'; statusEl.style.color = '#004d00'; }
-            },
-            startTalking: function() { mood = 'talking'; },
-            stopTalking: function() { mood = 'annoyed'; },
-            setIrritation: function(level) {
-                irritationLevel = Math.max(0, Math.min(100, level));
-                applyIrritationColor();
-                // Update status text to reflect mood
-                if (statusEl && mood !== 'dormant') {
-                    if (irritationLevel < 40) {
-                        statusEl.textContent = '[ ONLINE ]';
-                    } else if (irritationLevel < 55) {
-                        statusEl.textContent = '[ ANNOYED ]';
-                    } else if (irritationLevel < 70) {
-                        statusEl.textContent = '[ IRRITATED ]';
-                    } else if (irritationLevel < 85) {
-                        statusEl.textContent = '[ PISSED ]';
-                    } else {
-                        statusEl.textContent = '[ FURIOUS ]';
-                    }
-                }
-            }
-        };
-    })();
-    </script>
+    <script src="/static/effects.js?v=78"></script>
+    <script src="/static/audio.js?v=78"></script>
+    <script src="/static/app.js?v=78"></script>
+    <script src="/static/call.js?v=78"></script>
+    <script src="/static/chad3d.js?v=78"></script>
 </div><!-- /crt-screen -->
 </body>
 </html>

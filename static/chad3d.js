@@ -1,391 +1,472 @@
-// ChadGPT 3D Head - Michelangelo's David
+// chad3d.js — GigaChad green CRT display with edge-detected contour lines
+// Renders the actual GigaChad image as a green phosphor CRT with
+// Sobel edge contours for a "wireframe scan" aesthetic.
+// Mouth animation during TTS, mouse parallax, irritation color shift.
 
-class ChadAvatar {
-    constructor(containerId) {
-        this.container = document.getElementById(containerId);
-        this.isTalking = false;
-        this.mood = 'dormant';
-        this.headMesh = null;
-        this.allMeshes = [];
-        this.statusEl = document.getElementById('avatar-status');
-        this.wakeRequested = false;
-        this.modelLoaded = false;
+var chadAvatar = null;
 
-        if (!this.container) { console.error('CHAD3D: no container'); return; }
-        if (typeof THREE === 'undefined') { console.error('CHAD3D: THREE not loaded'); return; }
-        if (typeof THREE.GLTFLoader === 'undefined') { console.error('CHAD3D: GLTFLoader not loaded'); return; }
+(function() {
+    'use strict';
 
-        console.log('CHAD3D: init, THREE r' + THREE.REVISION);
-        this.initScene();
-        this.loadHead();
-        this.animate();
-    }
+    var container = document.getElementById('three-container');
+    var statusEl  = document.getElementById('avatar-status');
+    if (!container) return;
 
-    _log(msg) {
-        console.log('CHAD3D: ' + msg);
-        if (this.statusEl) this.statusEl.textContent = '[ ' + msg + ' ]';
-    }
+    // ================================================================
+    //  CANVAS SETUP
+    // ================================================================
 
-    initScene() {
-        this.scene = new THREE.Scene();
-        const rect = this.container.getBoundingClientRect();
-        const w = Math.max(Math.round(rect.width), 100);
-        const h = Math.max(Math.round(rect.height), 100);
-        console.log('CHAD3D: container', w, 'x', h);
+    var canvas = document.createElement('canvas');
+    canvas.style.display = 'block';
+    canvas.style.width  = '100%';
+    canvas.style.height = '100%';
+    container.appendChild(canvas);
+    var ctx = canvas.getContext('2d');
 
-        this.camera = new THREE.PerspectiveCamera(40, w / h, 0.01, 500);
-        this.camera.position.set(0, 0, 5.5);
-        this.camera.lookAt(0, 0, 0);
+    // ================================================================
+    //  STATE
+    // ================================================================
 
-        // CRITICAL: alpha must be false — CSS overlay blend modes make transparent canvases invisible
-        this.renderer = new THREE.WebGLRenderer({ alpha: false, antialias: true });
-        this.renderer.setSize(w, h);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        // Start with bright green to prove canvas is visible, then switch to dark
-        this.renderer.setClearColor(0x003300, 1);
-        this.container.appendChild(this.renderer.domElement);
+    var greenImg   = null;   // offscreen: green monochrome image
+    var edgeImg    = null;   // offscreen: Sobel edge contours
+    var modelLoaded = false;
 
-        // Ensure canvas fills container properly
-        this.renderer.domElement.style.display = 'block';
-        this.renderer.domElement.style.width = '100%';
-        this.renderer.domElement.style.height = '100%';
+    var mood          = 'dormant';
+    var wakeRequested = false;
+    var _smoothAmp    = 0;
+    var irritationLevel = 0;
+    var _brightness   = 0.15;
+    var _targetBright = 0.15;
+    var _colorR = 0, _colorG = 1, _colorB = 0.25;
 
-        // Delayed resize to handle flex layout timing
-        setTimeout(() => this.onResize(), 100);
-        setTimeout(() => this.onResize(), 500);
+    // Crop coordinates (set after image loads)
+    var cropX = 0, cropY = 0, cropW = 0, cropH = 0;
 
-        this.headGroup = new THREE.Group();
-        this.scene.add(this.headGroup);
+    // Mouth/jaw region (fraction of rendered area — tuned to chad.jpg crop)
+    // lipY = top of lip line, chinY = bottom of chin, jawW/narrowW = ellipse widths
+    var MOUTH = {
+        cx:    0.53,   // horizontal center of mouth
+        lipY:  0.52,   // y of lip line (split point)
+        chinY: 0.72,   // y of chin bottom
+        jawW:  0.22,   // half-width of jaw at lip line
+        narrowW: 0.10  // half-width at chin tip (tapers)
+    };
 
-        // Strong green lighting from multiple angles
-        this.scene.add(new THREE.AmbientLight(0x004400, 0.8));
-        const key = new THREE.DirectionalLight(0x00ff41, 2.0);
-        key.position.set(-3, 5, 8);
-        this.scene.add(key);
-        const fill = new THREE.DirectionalLight(0x00cc33, 1.0);
-        fill.position.set(5, -2, 4);
-        this.scene.add(fill);
-        const back = new THREE.PointLight(0x00ff41, 1.5, 50);
-        back.position.set(0, 2, -5);
-        this.scene.add(back);
+    // Mouse
+    var mouseX = 0, mouseY = 0, smoothX = 0, smoothY = 0;
+    document.addEventListener('mousemove', function(e) {
+        mouseX = (e.clientX / window.innerWidth)  * 2 - 1;
+        mouseY = (e.clientY / window.innerHeight) * 2 - 1;
+    });
 
-        window.addEventListener('resize', () => this.onResize());
-    }
+    // ================================================================
+    //  SIZING
+    // ================================================================
 
-    loadHead() {
-        const loader = new THREE.GLTFLoader();
-        this._log('loading...');
-
-        loader.load('/static/head.glb',
-            (gltf) => {
-                console.log('CHAD3D: GLB loaded, children:', gltf.scene.children.length);
-                try {
-                    this.setupModel(gltf.scene);
-                } catch (e) {
-                    console.error('CHAD3D: setupModel CRASHED:', e, e.stack);
-                    this._log('SETUP ERROR: ' + e.message);
-                }
-            },
-            (xhr) => {
-                if (xhr.total > 0) {
-                    const pct = Math.round(xhr.loaded / xhr.total * 100);
-                    if (pct === 50 || pct === 100) this._log('load ' + pct + '%');
-                }
-            },
-            (err) => {
-                console.error('CHAD3D: GLB load error:', err);
-                this._log('LOAD ERROR');
-            }
-        );
-    }
-
-    setupModel(model) {
-        const material = new THREE.MeshPhongMaterial({
-            color: 0x00aa2a,
-            emissive: 0x003300,
-            specular: 0x44ff66,
-            shininess: 90,
-            transparent: true,
-            opacity: 0.85,
-            side: THREE.DoubleSide,
-        });
-
-        let meshCount = 0;
-        model.traverse((node) => {
-            if (node.isMesh) {
-                node.geometry.computeVertexNormals();
-                node.material = material.clone();
-                this.allMeshes.push(node);
-                if (!this.headMesh) this.headMesh = node;
-                meshCount++;
-            }
-        });
-
-        console.log('CHAD3D:', meshCount, 'meshes found');
-        if (meshCount === 0) { this._log('NO MESHES'); return; }
-
-        // Add model to headGroup
-        this.headGroup.add(model);
-
-        // CRITICAL: Update world matrices from the SCENE ROOT
-        // This ensures the entire parent chain is fresh before we compute bounds
-        this.scene.updateMatrixWorld(true);
-
-        // Log the mesh node's world matrix to verify transforms are applied
-        if (this.headMesh) {
-            const m = this.headMesh.matrixWorld.elements;
-            console.log('CHAD3D: mesh matrixWorld diagonal:', m[0].toFixed(6), m[5].toFixed(6), m[10].toFixed(6));
-            console.log('CHAD3D: mesh matrixWorld translation:', m[12].toFixed(3), m[13].toFixed(3), m[14].toFixed(3));
-            // If diagonal is ~1.0 and translation is ~0, transforms NOT applied (identity matrix)
-            // If diagonal is ~0.003 and translation is ~(7, -30, 175), transforms ARE applied
-            const isIdentity = Math.abs(m[0] - 1) < 0.01 && Math.abs(m[5] - 1) < 0.01;
-            if (isIdentity) {
-                console.warn('CHAD3D: WARNING - mesh worldMatrix appears to be IDENTITY! Transforms may not be applied.');
-            }
+    function sizeCanvas() {
+        var r = container.getBoundingClientRect();
+        var w = Math.floor(Math.max(r.width, 100));
+        var h = Math.floor(Math.max(r.height, 100));
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width  = w;
+            canvas.height = h;
         }
+    }
+    sizeCanvas();
+    window.addEventListener('resize', function() {
+        sizeCanvas();
+        if (modelLoaded) rebuildOffscreen();
+    });
+    setTimeout(sizeCanvas, 300);
+    setTimeout(function() { sizeCanvas(); if (modelLoaded) rebuildOffscreen(); }, 1000);
 
-        // Compute bounding box via MANUAL vertex traversal
-        // (more reliable than Box3.setFromObject across Three.js versions)
-        let minX = Infinity, minY = Infinity, minZ = Infinity;
-        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-        const _v = new THREE.Vector3();
-        let vtxCount = 0;
+    // ================================================================
+    //  IMAGE LOADING & PROCESSING
+    // ================================================================
 
-        model.traverse((node) => {
-            if (node.isMesh && node.geometry.attributes.position) {
-                const pos = node.geometry.attributes.position;
-                for (let i = 0; i < pos.count; i++) {
-                    _v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
-                    _v.applyMatrix4(node.matrixWorld);
-                    if (_v.x < minX) minX = _v.x;
-                    if (_v.y < minY) minY = _v.y;
-                    if (_v.z < minZ) minZ = _v.z;
-                    if (_v.x > maxX) maxX = _v.x;
-                    if (_v.y > maxY) maxY = _v.y;
-                    if (_v.z > maxZ) maxZ = _v.z;
-                    vtxCount++;
-                }
-            }
-        });
+    if (statusEl) statusEl.textContent = '[ LOADING... ]';
 
-        console.log('CHAD3D: traversed', vtxCount, 'vertices');
+    var srcImg = new Image();
+    srcImg.onload = function() {
+        computeCrop(srcImg);
+        rebuildOffscreen();
+        modelLoaded = true;
 
-        let cx, cy, cz, sizeX, sizeY, sizeZ, maxDim;
-        let usedFallback = false;
-
-        if (vtxCount > 0 && isFinite(minX) && isFinite(maxX)) {
-            cx = (minX + maxX) / 2;
-            cy = (minY + maxY) / 2;
-            cz = (minZ + maxZ) / 2;
-            sizeX = maxX - minX;
-            sizeY = maxY - minY;
-            sizeZ = maxZ - minZ;
-            maxDim = Math.max(sizeX, sizeY, sizeZ);
-            console.log('CHAD3D: bbox min:', minX.toFixed(3), minY.toFixed(3), minZ.toFixed(3));
-            console.log('CHAD3D: bbox max:', maxX.toFixed(3), maxY.toFixed(3), maxZ.toFixed(3));
-            console.log('CHAD3D: bbox center:', cx.toFixed(3), cy.toFixed(3), cz.toFixed(3));
-            console.log('CHAD3D: bbox size:', sizeX.toFixed(3), sizeY.toFixed(3), sizeZ.toFixed(3));
-            console.log('CHAD3D: maxDim:', maxDim.toFixed(4));
-        }
-
-        // Fallback to HARDCODED values from GLB binary analysis
-        // The Sketchfab head.glb has a root node matrix that places the model at:
-        //   center ≈ (7.28, -30.31, 175.39) with size ≈ (0.49, 0.68, 0.50)
-        if (!maxDim || maxDim < 0.001 || !isFinite(maxDim)) {
-            console.warn('CHAD3D: dynamic bbox FAILED, using hardcoded fallback');
-            cx = 7.283; cy = -30.308; cz = 175.391;
-            sizeX = 0.49; sizeY = 0.68; sizeZ = 0.50;
-            maxDim = 0.68;
-            usedFallback = true;
-        }
-
-        // If the bounding box center is near origin and size is huge (>100),
-        // the world matrix was identity (transforms not applied).
-        // In that case, the raw mesh spans (-0.02, -200, 0.01) to (133, -0.03, 138).
-        // We still center and scale it, just with different values.
-        if (maxDim > 100) {
-            console.log('CHAD3D: large maxDim detected — raw mesh coordinates (transforms not applied)');
-            // This is fine — we'll center and scale the raw mesh
-        }
-
-        // Scale to fill ~3.0 units in view
-        const targetSize = 3.0;
-        const s = targetSize / maxDim;
-
-        // Center the model at origin
-        model.position.set(-cx, -cy, -cz);
-        model.position.y += sizeY * 0.05; // nudge face up slightly
-        this.headGroup.scale.set(s, s, s);
-
-        // Camera
-        this.camera.position.set(0, 0.2, 5.5);
-        this.camera.lookAt(0, 0, 0);
-        this.camera.updateProjectionMatrix();
-
-        // Rotation to face camera
-        // The Sketchfab David's root node includes a ~180° X rotation.
-        // After that rotation, the face points along +Z if the raw face was along -Z,
-        // or along -Z if the raw face was along +Z.
-        // Math.PI around Y flips between these. We try PI first.
-        // If the user sees the back of the head, change to 0.
-        this.headGroup.rotation.y = 0;
-
-        console.log('CHAD3D: === SETUP COMPLETE ===');
-        console.log('CHAD3D: scale:', s.toFixed(4), 'fallback:', usedFallback);
-        console.log('CHAD3D: model.position:', model.position.x.toFixed(2), model.position.y.toFixed(2), model.position.z.toFixed(2));
-
-        this.modelLoaded = true;
-
-        // Handle wake timing: if wake() was called before model finished loading,
-        // go directly to full opacity instead of staying dim
-        if (this.wakeRequested) {
-            console.log('CHAD3D: wake was already requested, applying full opacity');
-            this.setOpacity(1);
-            this.mood = 'annoyed';
-            if (this.statusEl) {
-                this.statusEl.textContent = '[ ONLINE — IRRITATED ]';
-                this.statusEl.style.color = '#00ff41';
-            }
+        if (wakeRequested) {
+            _targetBright = 1.0;
+            if (statusEl) { statusEl.textContent = '[ ONLINE ]'; statusEl.style.color = '#00ff41'; }
         } else {
-            // Dormant: 35% opacity (was 15%, too dim with overlays)
-            this.setOpacity(0.35);
+            if (statusEl) statusEl.textContent = '[ READY ]';
+        }
+        console.log('[CHAD3D] GigaChad CRT display ready');
+    };
+    srcImg.onerror = function() {
+        console.error('[CHAD3D] chad.jpg failed');
+        if (statusEl) statusEl.textContent = '[ IMG ERROR ]';
+    };
+    srcImg.src = '/static/chad.jpg?' + Date.now();
+
+    // ----------------------------------------------------------------
+    //  Compute crop: portrait region centered on face
+    // ----------------------------------------------------------------
+    function computeCrop(img) {
+        var faceCX = img.width  * 0.60;   // face center X
+        var faceCY = img.height * 0.40;   // face center Y
+
+        var aspect = canvas.height / Math.max(canvas.width, 1);
+
+        cropW = img.width * 0.48;
+        cropH = cropW * aspect;
+
+        if (cropH > img.height * 0.97) {
+            cropH = img.height * 0.97;
+            cropW = cropH / aspect;
         }
 
-        this._log('READY');
+        cropX = faceCX - cropW * 0.48;
+        cropY = faceCY - cropH * 0.33;
+
+        cropX = Math.max(0, Math.min(img.width  - cropW, cropX));
+        cropY = Math.max(0, Math.min(img.height - cropH, cropY));
     }
 
-    setOpacity(factor) {
-        const f = Math.max(factor, 0.08);
-        for (const mesh of this.allMeshes) {
-            mesh.material.opacity = 0.85 * f;
-            mesh.material.emissive.setRGB(0, 0.13 * f, 0);
+    // ----------------------------------------------------------------
+    //  Build offscreen canvases (green image + edge map)
+    // ----------------------------------------------------------------
+    function rebuildOffscreen() {
+        if (!srcImg.complete || !srcImg.width) return;
+        var w = canvas.width, h = canvas.height;
+
+        // --- Green monochrome ---
+        greenImg = document.createElement('canvas');
+        greenImg.width = w;  greenImg.height = h;
+        var gCtx = greenImg.getContext('2d');
+        gCtx.drawImage(srcImg, cropX, cropY, cropW, cropH, 0, 0, w, h);
+
+        var gData = gCtx.getImageData(0, 0, w, h);
+        var d = gData.data;
+        for (var i = 0; i < d.length; i += 4) {
+            var lum = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+            d[i]     = lum * 0.03;    // R
+            d[i + 1] = lum * 0.90;    // G
+            d[i + 2] = lum * 0.18;    // B
         }
-    }
+        gCtx.putImageData(gData, 0, 0);
 
-    startTalking() {
-        this.isTalking = true;
-        this.mood = 'talking';
-        if (this.statusEl) {
-            this.statusEl.textContent = '[ SPEAKING ]';
-            this.statusEl.style.color = '#00ff41';
-        }
-    }
+        // --- Sobel edge detection → contour lines ---
+        edgeImg = document.createElement('canvas');
+        edgeImg.width = w;  edgeImg.height = h;
+        var eCtx = edgeImg.getContext('2d');
 
-    stopTalking() {
-        this.isTalking = false;
-        this.mood = 'annoyed';
-        if (this.statusEl) this.statusEl.textContent = '[ ANNOYED ]';
-    }
+        // Use the green channel of the processed image for edges
+        var src = gData.data;
+        var dst = new Uint8ClampedArray(src.length);
 
-    wake() {
-        this.wakeRequested = true;
-        this.mood = 'annoyed';
+        for (var y = 1; y < h - 1; y++) {
+            for (var x = 1; x < w - 1; x++) {
+                var c = 1;  // sample green channel
+                var tl = src[((y-1)*w+(x-1))*4+c], tc = src[((y-1)*w+x)*4+c], tr = src[((y-1)*w+(x+1))*4+c];
+                var ml = src[(y*w+(x-1))*4+c],                                  mr = src[(y*w+(x+1))*4+c];
+                var bl = src[((y+1)*w+(x-1))*4+c], bc = src[((y+1)*w+x)*4+c], br = src[((y+1)*w+(x+1))*4+c];
 
-        if (!this.modelLoaded || this.allMeshes.length === 0) {
-            // Model hasn't loaded yet — setupModel will check wakeRequested
-            console.log('CHAD3D: wake() deferred (model not loaded yet)');
-            return;
-        }
+                var gx = -tl + tr - 2*ml + 2*mr - bl + br;
+                var gy = -tl - 2*tc - tr + bl + 2*bc + br;
+                var mag = Math.sqrt(gx * gx + gy * gy);
 
-        this._log('waking up');
-        let p = 0;
-        const fadeIn = () => {
-            p += 0.025;
-            if (p >= 1) {
-                this.setOpacity(1);
-                if (this.statusEl) {
-                    this.statusEl.textContent = '[ ONLINE — IRRITATED ]';
-                    this.statusEl.style.color = '#00ff41';
-                }
-                return;
+                // Threshold + brighten edges
+                mag = mag > 18 ? Math.min(255, mag * 1.8) : 0;
+
+                var di = (y * w + x) * 4;
+                dst[di]     = mag * 0.05;
+                dst[di + 1] = mag;
+                dst[di + 2] = mag * 0.25;
+                dst[di + 3] = mag > 0 ? 255 : 0;
             }
-            this.setOpacity(p);
-            requestAnimationFrame(fadeIn);
-        };
-        fadeIn();
-    }
-
-    sleep() {
-        this.mood = 'dormant';
-        this.isTalking = false;
-        this.wakeRequested = false;
-        this.setOpacity(0.35);
-        if (this.statusEl) {
-            this.statusEl.textContent = '[ DORMANT ]';
-            this.statusEl.style.color = '#004d00';
         }
+
+        eCtx.putImageData(new ImageData(dst, w, h), 0, 0);
+
+        console.log('[CHAD3D] Offscreen rebuilt: ' + w + 'x' + h);
     }
 
-    animate() {
-        requestAnimationFrame(() => this.animate());
-        if (!this.renderer) return;
-        const t = Date.now() * 0.001;
+    // ================================================================
+    //  GRID OVERLAY (drawn each frame — very fast)
+    // ================================================================
 
-        const baseY = 0;
-        if (this.mood !== 'dormant') {
-            this.headGroup.rotation.y = baseY + Math.sin(t * 0.3) * 0.1;
-            this.headGroup.rotation.x = Math.sin(t * 0.2) * 0.02;
+    var GRID_SPACE = 20;
+    var GRID_ALPHA = 0.07;
+
+    function drawGrid(w, h, alpha) {
+        ctx.strokeStyle = 'rgba(0,255,65,' + (alpha * _brightness).toFixed(3) + ')';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        for (var gx = 0; gx < w; gx += GRID_SPACE) { ctx.moveTo(gx, 0); ctx.lineTo(gx, h); }
+        for (var gy = 0; gy < h; gy += GRID_SPACE) { ctx.moveTo(0, gy); ctx.lineTo(w, gy); }
+        ctx.stroke();
+    }
+
+    // ================================================================
+    //  SCANLINES
+    // ================================================================
+
+    var scanCanvas = null;
+    function ensureScanlines(w, h) {
+        if (scanCanvas && scanCanvas.width === w && scanCanvas.height === h) return;
+        scanCanvas = document.createElement('canvas');
+        scanCanvas.width = w; scanCanvas.height = h;
+        var sc = scanCanvas.getContext('2d');
+        sc.fillStyle = 'rgba(0,0,0,0.1)';
+        for (var sy = 0; sy < h; sy += 3) sc.fillRect(0, sy, w, 1);
+    }
+
+    // ================================================================
+    //  RENDER LOOP
+    // ================================================================
+
+    (function animate() {
+        requestAnimationFrame(animate);
+
+        var t  = Date.now() * 0.001;
+        var cw = canvas.width, ch = canvas.height;
+
+        // Brightness easing
+        _brightness += (_targetBright - _brightness) * 0.06;
+
+        // Mouse smoothing
+        smoothX += (mouseX - smoothX) * 0.04;
+        smoothY += (mouseY - smoothY) * 0.04;
+
+        // Voice amplitude
+        if (mood === 'talking') {
+            var raw = (typeof getVoiceAmplitude === 'function') ? getVoiceAmplitude() : 0;
+            _smoothAmp += (raw - _smoothAmp) * 0.35;
         } else {
-            // Wider dormant oscillation so user can confirm head exists
-            this.headGroup.rotation.y = baseY + Math.sin(t * 0.1) * 0.2;
-            this.headGroup.rotation.x = 0;
+            _smoothAmp *= 0.85;
+        }
+        var amp = _smoothAmp;
+
+        // --- Clear ---
+        ctx.fillStyle = '#050505';
+        ctx.fillRect(0, 0, cw, ch);
+
+        if (!modelLoaded) return;
+
+        // --- Compute offsets ---
+        var parallaxX, parallaxY, swayX, swayY;
+
+        if (mood === 'dormant') {
+            parallaxX = smoothX * 3;
+            parallaxY = smoothY * 2;
+            swayX = Math.sin(t * 0.1) * 3;
+            swayY = 0;
+        } else {
+            parallaxX = smoothX * 8;
+            parallaxY = smoothY * 5;
+            swayX = Math.sin(t * 0.3) * 1.5;
+            swayY = Math.sin(t * 0.2) * 0.8;
         }
 
-        if (this.allMeshes.length > 0) {
-            if (this.mood === 'talking') {
-                const pulse = Math.sin(t * 6) * 0.2 + 0.8;
-                for (const m of this.allMeshes) {
-                    m.material.emissive.setRGB(0, 0.05 + pulse * 0.15, 0);
-                    m.material.opacity = 0.75 + pulse * 0.12;
-                }
-                this.headGroup.rotation.x = Math.sin(t * 8) * 0.01 + Math.sin(t * 0.2) * 0.02;
-            } else if (this.mood === 'annoyed') {
-                for (const m of this.allMeshes) {
-                    m.material.emissive.setRGB(0, 0.13, 0);
-                    m.material.opacity = 0.85;
-                }
+        var speechX = amp * Math.sin(t * 8) * 2;
+        var speechY = amp * Math.sin(t * 12) * 1;
+        var ox = parallaxX + swayX + speechX;
+        var oy = parallaxY + swayY + speechY;
+
+        var breathS = 1 + (mood !== 'dormant' ? Math.sin(t * 1.2) * 0.003 : 0);
+
+        // --- Draw base green image (dim) ---
+        ctx.save();
+        ctx.globalAlpha = _brightness * 0.45;
+
+        var cx = cw / 2, cy = ch / 2;
+        ctx.translate(cx + ox, cy + oy);
+        ctx.scale(breathS, breathS);
+        ctx.translate(-cx, -cy);
+
+        ctx.drawImage(greenImg, 0, 0, cw, ch);
+        ctx.restore();
+
+        // --- Draw edge contour lines (bright — this is the "wireframe") ---
+        ctx.save();
+        ctx.globalAlpha = _brightness * 0.9;
+
+        ctx.translate(cx + ox, cy + oy);
+        ctx.scale(breathS, breathS);
+        ctx.translate(-cx, -cy);
+
+        ctx.drawImage(edgeImg, 0, 0, cw, ch);
+        ctx.restore();
+
+        // --- Mouth animation: elliptical jaw cutout, shift chin down in sync ---
+        if (amp > 0.03 && greenImg) {
+            var lipPx   = ch * MOUTH.lipY;            // y of lip line in px
+            var chinPx  = ch * MOUTH.chinY;           // y of chin bottom
+            var mcx     = cw * MOUTH.cx;              // center x
+            var jawHW   = cw * MOUTH.jawW;            // half-width at lip line
+            var narrowHW = cw * MOUTH.narrowW;        // half-width at chin tip
+            var jawH    = chinPx - lipPx;             // total jaw height
+            var openAmt = amp * 10;                   // pixels of jaw drop
+
+            ctx.save();
+            ctx.translate(cx + ox, cy + oy);
+            ctx.scale(breathS, breathS);
+            ctx.translate(-cx, -cy);
+
+            // Build an organic jaw/chin clip path (rounded trapezoid)
+            function jawPath(yOffset) {
+                ctx.beginPath();
+                var top  = lipPx + yOffset;
+                var bot  = chinPx + yOffset;
+                var mid  = top + jawH * 0.55;
+                // Start top-left, trace clockwise
+                ctx.moveTo(mcx - jawHW, top);
+                // Top edge (straight across mouth)
+                ctx.lineTo(mcx + jawHW, top);
+                // Right side tapers in with a curve
+                ctx.bezierCurveTo(
+                    mcx + jawHW,       mid,
+                    mcx + narrowHW * 1.3, bot - jawH * 0.15,
+                    mcx + narrowHW,    bot
+                );
+                // Chin bottom (rounded)
+                ctx.quadraticCurveTo(mcx, bot + jawH * 0.06, mcx - narrowHW, bot);
+                // Left side tapers in with a curve
+                ctx.bezierCurveTo(
+                    mcx - narrowHW * 1.3, bot - jawH * 0.15,
+                    mcx - jawHW,       mid,
+                    mcx - jawHW,       top
+                );
+                ctx.closePath();
+            }
+
+            // 1. Erase the original jaw region (paint black over it)
+            ctx.save();
+            jawPath(0);
+            ctx.clip();
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, cw, ch);
+            ctx.restore();
+
+            // 2. Dark mouth slit at the opening gap
+            ctx.fillStyle = 'rgba(5,5,5,' + Math.min(0.9, amp * 1.2).toFixed(2) + ')';
+            ctx.fillRect(mcx - jawHW * 0.8, lipPx - 1, jawHW * 1.6, openAmt + 3);
+
+            // 3. Redraw jaw region shifted down (clipped to jaw shape)
+            ctx.save();
+            jawPath(openAmt);
+            ctx.clip();
+
+            // Shift: draw the original lip→chin region at lip+openAmt
+            ctx.globalAlpha = _brightness * 0.45;
+            ctx.drawImage(greenImg,
+                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
+                mcx - jawHW - 2, lipPx + openAmt, jawHW * 2 + 4, jawH + 4);
+            ctx.globalAlpha = _brightness * 0.9;
+            ctx.drawImage(edgeImg,
+                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
+                mcx - jawHW - 2, lipPx + openAmt, jawHW * 2 + 4, jawH + 4);
+
+            ctx.restore();
+
+            ctx.restore();
+        }
+
+        // --- Irritation color overlay ---
+        if (irritationLevel > 35 && _brightness > 0.1) {
+            var iFrac = (irritationLevel - 35) / 65;
+            ctx.save();
+            ctx.globalAlpha = iFrac * 0.25 * _brightness;
+            ctx.globalCompositeOperation = 'screen';
+            ctx.fillStyle = 'rgb(' +
+                Math.round(_colorR * 180) + ',' +
+                Math.round(_colorG * 60)  + ',' +
+                Math.round(_colorB * 30)  + ')';
+            ctx.fillRect(0, 0, cw, ch);
+            ctx.restore();
+        }
+
+        // --- Grid overlay ---
+        drawGrid(cw, ch, GRID_ALPHA);
+
+        // --- Scanlines ---
+        ensureScanlines(cw, ch);
+        ctx.drawImage(scanCanvas, 0, 0);
+
+        // --- Vignette ---
+        var vg = ctx.createRadialGradient(cx, cy, Math.min(cw, ch) * 0.25, cx, cy, Math.max(cw, ch) * 0.72);
+        vg.addColorStop(0, 'rgba(0,0,0,0)');
+        vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+        ctx.fillStyle = vg;
+        ctx.fillRect(0, 0, cw, ch);
+
+    })();
+
+    // ================================================================
+    //  COLOR HELPERS
+    // ================================================================
+
+    function getIrritationColor(level) {
+        if (level < 40) return { r: 0, g: 1.0, b: 0.25 };
+        if (level < 70) {
+            var t = (level - 40) / 30;
+            return { r: t, g: 1.0 - t * 0.4, b: 0.25 * (1 - t) };
+        }
+        var t2 = (level - 70) / 30;
+        return { r: 1.0, g: 0.6 - t2 * 0.5, b: 0 };
+    }
+
+    function setIrritationColors(level) {
+        var c = getIrritationColor(level);
+        _colorR = c.r; _colorG = c.g; _colorB = c.b;
+    }
+
+    // ================================================================
+    //  PUBLIC API
+    // ================================================================
+
+    chadAvatar = {
+        wake: function() {
+            wakeRequested = true;
+            mood = 'annoyed';
+            _targetBright = 1.0;
+            if (modelLoaded && statusEl) {
+                statusEl.textContent = '[ ONLINE ]';
+                statusEl.style.color = '#00ff41';
+            }
+        },
+
+        sleep: function() {
+            mood = 'dormant';
+            wakeRequested = false;
+            irritationLevel = 0;
+            setIrritationColors(0);
+            _targetBright = 0.15;
+            if (statusEl) { statusEl.textContent = '[ DORMANT ]'; statusEl.style.color = '#004d00'; }
+        },
+
+        startTalking: function() { mood = 'talking'; },
+        stopTalking:  function() { mood = 'annoyed'; },
+
+        setIrritation: function(level) {
+            irritationLevel = Math.max(0, Math.min(100, level));
+            setIrritationColors(irritationLevel);
+
+            if (statusEl && mood !== 'dormant') {
+                var lbl;
+                if (irritationLevel < 40)       lbl = '[ ONLINE ]';
+                else if (irritationLevel < 55)  lbl = '[ ANNOYED ]';
+                else if (irritationLevel < 70)  lbl = '[ IRRITATED ]';
+                else if (irritationLevel < 85)  lbl = '[ PISSED ]';
+                else                             lbl = '[ FURIOUS ]';
+                statusEl.textContent = lbl;
+
+                var c = getIrritationColor(irritationLevel);
+                statusEl.style.color = 'rgb(' +
+                    Math.round(c.r * 255) + ',' +
+                    Math.round(c.g * 255) + ',' +
+                    Math.round(c.b * 255) + ')';
             }
         }
+    };
 
-        this.renderer.render(this.scene, this.camera);
-    }
-
-    onResize() {
-        if (!this.container || !this.renderer || !this.camera) return;
-        const rect = this.container.getBoundingClientRect();
-        const w = Math.round(rect.width);
-        const h = Math.round(rect.height);
-        if (w > 10 && h > 10) {
-            this.camera.aspect = w / h;
-            this.camera.updateProjectionMatrix();
-            this.renderer.setSize(w, h);
-        }
-    }
-}
-
-let chadAvatar;
-
-// Initialize immediately — script is at bottom of body so DOM is ready
-// Also add DOMContentLoaded fallback in case it hasn't fired yet
-function initChad() {
-    if (chadAvatar) return; // already initialized
-    const el = document.getElementById('three-container');
-    if (!el) {
-        console.error('CHAD3D: three-container not found!');
-        return;
-    }
-    try {
-        chadAvatar = new ChadAvatar('three-container');
-    } catch (e) {
-        console.error('CHAD3D FATAL:', e);
-        const s = document.getElementById('avatar-status');
-        if (s) s.textContent = '[ FATAL: ' + e.message + ' ]';
-    }
-}
-
-// Try immediately
-initChad();
-// Fallback: try again on DOMContentLoaded
-document.addEventListener('DOMContentLoaded', initChad);
-// Last resort: try on window load
-window.addEventListener('load', initChad);
+    console.log('[CHAD3D] CRT display initialized, loading image...');
+})();
