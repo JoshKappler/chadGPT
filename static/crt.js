@@ -74,7 +74,7 @@ var crtOverlay = (function() {
                 '<feImage href="' + dataURL + '" result="map" preserveAspectRatio="none" ' +
                   'x="0%" y="0%" width="100%" height="100%" />' +
                 '<feDisplacementMap in="SourceGraphic" in2="map" ' +
-                  'scale="60" xChannelSelector="R" yChannelSelector="G" />' +
+                  'scale="40" xChannelSelector="R" yChannelSelector="G" />' +
               '</filter>' +
             '</defs>';
         document.body.insertBefore(svg, document.body.firstChild);

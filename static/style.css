@@ -95,7 +95,7 @@ body {
     height: 100%;
     pointer-events: none;
     z-index: 1000;
-    opacity: 0.04;
+    opacity: 0.03;
     mix-blend-mode: overlay;
 }
 

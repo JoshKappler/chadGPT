@@ -11,14 +11,14 @@
 </head>
 <body>
 <div id="crt-screen">
-  <!-- Content wrapper: SVG barrel distortion filter applied here.
-       The WebGL CRT overlay canvas is appended OUTSIDE this wrapper
-       (directly to #crt-screen) so it isn't affected by the filter. -->
-  <div id="crt-content">
-    <canvas id="static-overlay"></canvas>
-    <div id="scanlines"></div>
-    <div id="flicker-overlay"></div>
+  <!-- Overlay effects: OUTSIDE #crt-content so they sit on top of the
+       barrel-distorted content and aren't affected by the SVG filter. -->
+  <canvas id="static-overlay"></canvas>
+  <div id="scanlines"></div>
+  <div id="flicker-overlay"></div>
 
+  <!-- Content wrapper: SVG barrel distortion filter applied here. -->
+  <div id="crt-content">
     <!-- POWER STAGE: Full-screen centered lever (only thing visible pre-boot) -->
     <div id="power-stage" onclick="togglePower()">
         <div id="ps-unit">
