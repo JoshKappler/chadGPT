@@ -1,14 +1,9 @@
 /**
- * CRT Post-Processing: Barrel Distortion + Overlay Effects
+ * CRT Post-Processing Overlay
  *
- * Two-layer approach:
- * 1. SVG displacement filter on #crt-content — actually warps/bulges the
- *    page content like curved CRT glass (barrel distortion).
- * 2. WebGL overlay canvas on #crt-screen — renders scanlines, phosphor
- *    grid, and vignette on top.
- *
- * The WebGL canvas sits OUTSIDE #crt-content so the SVG filter doesn't
- * affect it (CSS filter on WebGL canvas ancestors can blank the canvas).
+ * Fullscreen WebGL canvas rendering CRT glass effects on top of all content:
+ * scanlines, phosphor dot grid, vignette darkening, interlace shimmer.
+ * Pure alpha overlay — only darkens, never adds color.
  */
 
 var crtOverlay = (function() {
@@ -19,71 +14,6 @@ var crtOverlay = (function() {
     var startTime = Date.now();
     var _animFrame = null;
     var _enabled = true;
-
-    // ---- Barrel Distortion (SVG displacement filter) ----
-
-    function initBarrelDistortion() {
-        var content = document.getElementById('crt-content');
-        if (!content) return;
-
-        // Generate a displacement map: encodes barrel distortion as pixel colors.
-        // R channel = X displacement, G channel = Y displacement.
-        // 128 = no displacement, <128 = negative, >128 = positive.
-        var size = 512;
-        var mapCanvas = document.createElement('canvas');
-        mapCanvas.width = size;
-        mapCanvas.height = size;
-        var ctx = mapCanvas.getContext('2d');
-        var img = ctx.createImageData(size, size);
-        var d = img.data;
-
-        var strength = 0.35; // distortion intensity
-
-        for (var y = 0; y < size; y++) {
-            for (var x = 0; x < size; x++) {
-                // Normalized coords: -1 to 1
-                var nx = (x / (size - 1)) * 2.0 - 1.0;
-                var ny = (y / (size - 1)) * 2.0 - 1.0;
-
-                // Barrel distortion: displacement = position * r^2
-                var r2 = nx * nx + ny * ny;
-                var dx = nx * r2 * strength;
-                var dy = ny * r2 * strength;
-
-                // Encode: 0.5 maps to 128 (no displacement)
-                var r = Math.round(Math.max(0, Math.min(255, (0.5 + dx * 0.5) * 255)));
-                var g = Math.round(Math.max(0, Math.min(255, (0.5 + dy * 0.5) * 255)));
-
-                var i = (y * size + x) * 4;
-                d[i]     = r;
-                d[i + 1] = g;
-                d[i + 2] = 128;
-                d[i + 3] = 255;
-            }
-        }
-        ctx.putImageData(img, 0, 0);
-        var dataURL = mapCanvas.toDataURL('image/png');
-
-        // Create SVG filter element
-        var svgNS = 'http://www.w3.org/2000/svg';
-        var svg = document.createElementNS(svgNS, 'svg');
-        svg.setAttribute('style', 'position:absolute;width:0;height:0');
-        svg.innerHTML =
-            '<defs>' +
-              '<filter id="crt-barrel" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">' +
-                '<feImage href="' + dataURL + '" result="map" preserveAspectRatio="none" ' +
-                  'x="0%" y="0%" width="100%" height="100%" />' +
-                '<feDisplacementMap in="SourceGraphic" in2="map" ' +
-                  'scale="40" xChannelSelector="R" yChannelSelector="G" />' +
-              '</filter>' +
-            '</defs>';
-        document.body.insertBefore(svg, document.body.firstChild);
-
-        // Apply filter to content wrapper
-        content.style.filter = 'url(#crt-barrel)';
-    }
-
-    // ---- WebGL Overlay (scanlines, phosphor, vignette) ----
 
     var VERT_SRC = 'attribute vec2 a;void main(){gl_Position=vec4(a,0,1);}';
 
@@ -131,7 +61,6 @@ void main() {
 
         var screen = document.getElementById('crt-screen');
         if (!screen) return false;
-        // Append directly to #crt-screen, NOT inside #crt-content
         screen.appendChild(canvas);
 
         gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: false });
@@ -205,16 +134,12 @@ void main() {
         start: function() {
             if (_animFrame) return;
             _enabled = true;
-            initBarrelDistortion();
             if (!gl && !initGL()) return;
             render();
         },
         stop: function() {
             _enabled = false;
             if (_animFrame) { cancelAnimationFrame(_animFrame); _animFrame = null; }
-            // Remove barrel distortion filter
-            var content = document.getElementById('crt-content');
-            if (content) content.style.filter = '';
         },
         setEnabled: function(v) {
             _enabled = !!v;

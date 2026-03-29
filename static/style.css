@@ -51,14 +51,6 @@ body {
         0 0 100px 12px rgba(0,255,65,0.03);
 }
 
-/* Content wrapper — barrel distortion SVG filter applied here.
-   Sits inside #crt-screen, contains everything EXCEPT the WebGL CRT overlay. */
-#crt-content {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    /* Filter is applied dynamically by crt.js after generating the displacement map */
-}
 
 /* CRT glass edge — bright green line tracing the screen border */
 #crt-screen::before {
