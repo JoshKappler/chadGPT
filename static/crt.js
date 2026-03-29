@@ -2,22 +2,21 @@
  * CRT Post-Processing Overlay
  *
  * Fullscreen WebGL canvas that renders CRT "glass" effects on top of all content:
- *   - RGB phosphor shadow mask (visible sub-pixel dot pattern)
- *   - Scanlines with subtle wobble
- *   - Barrel distortion vignette (simulates curved tube glass)
- *   - Chromatic aberration at screen edges
- *   - Screen curvature darkening
- *   - Subtle horizontal color bleed
+ *   - RGB phosphor dot pattern (round dots with dark gaps)
+ *   - Heavy scanlines with wobble
+ *   - Strong barrel-curve vignette (simulates curved tube glass)
+ *   - Visible chromatic aberration at screen edges
+ *   - Interlace shimmer and vertical hold breathing
  *
- * The canvas uses pointer-events:none and composites via CSS blend mode.
+ * The canvas uses pointer-events:none and composites via alpha blending.
  * It does NOT capture or distort page content — it renders patterns that
- * create the illusion of curved CRT glass when layered on top.
+ * create the illusion of old CRT glass when layered on top.
  */
 
 var crtOverlay = (function() {
     'use strict';
 
-    var canvas, gl, program, vao;
+    var canvas, gl, program;
     var uTime, uResolution;
     var startTime = Date.now();
     var _animFrame = null;
@@ -33,88 +32,89 @@ var crtOverlay = (function() {
     ].join('\n');
 
     // Fragment shader: all CRT effects in one pass.
-    // This is a pure OVERLAY — it darkens and tints but never masks content.
-    // Actual screen curvature is handled by an SVG displacement filter on the DOM.
-    var FRAG_SRC = [
-        'precision mediump float;',
-        'uniform vec2 uResolution;',
-        'uniform float uTime;',
-        '',
-        'void main() {',
-        '    vec2 uv = gl_FragCoord.xy / uResolution;',
-        '    uv.y = 1.0 - uv.y;',
-        '    vec2 px = uv * uResolution;',
-        '',
-        '    float alpha = 0.0;',
-        '    vec3 color = vec3(0.0);',
-        '',
-        '    // --- Scanlines ---',
-        '    // Every 3rd pixel row darkens. Slight horizontal wobble over time.',
-        '    float scanY = px.y + sin(uTime * 0.3 + uv.x * 3.0) * 0.5;',
-        '    float scanPhase = mod(scanY, 3.0) / 3.0;',
-        '    float scanline = smoothstep(0.4, 0.6, scanPhase) * 0.18;',
-        '',
-        '    // --- RGB Phosphor Shadow Mask ---',
-        '    // Triangular shadow mask: RGB dot triads offset every other row.',
-        '    float maskScale = 3.0;',
-        '    float row = floor(px.y / maskScale);',
-        '    float xOffset = mod(row, 2.0) * maskScale * 1.5;',
-        '    float subPixel = mod(px.x + xOffset, maskScale * 3.0);',
-        '',
-        '    vec3 phosphor;',
-        '    if (subPixel < maskScale) {',
-        '        phosphor = vec3(1.0, 0.15, 0.15);',
-        '    } else if (subPixel < maskScale * 2.0) {',
-        '        phosphor = vec3(0.15, 1.0, 0.15);',
-        '    } else {',
-        '        phosphor = vec3(0.15, 0.15, 1.0);',
-        '    }',
-        '',
-        '    // Soften phosphor edges',
-        '    float withinSub = mod(subPixel, maskScale);',
-        '    float pEdge = smoothstep(0.0, 1.2, withinSub) * smoothstep(maskScale, maskScale - 1.2, withinSub);',
-        '    phosphor = mix(vec3(0.4), phosphor, pEdge * 0.65 + 0.35);',
-        '',
-        '    // --- CRT tube vignette ---',
-        '    // Barrel-shaped darkening: stronger at corners, follows curved glass profile.',
-        '    vec2 centered = uv - 0.5;',
-        '    // Barrel curve: r^2 + r^4 gives the characteristic CRT falloff',
-        '    float r2 = dot(centered, centered);',
-        '    float barrel = r2 + r2 * r2 * 0.6;',
-        '    float vig = 1.0 - barrel * 2.2;',
-        '    vig = clamp(vig, 0.0, 1.0);',
-        '    vig = pow(vig, 0.7);',
-        '    float cornerDark = pow(1.0 - vig, 2.0) * 0.55;',
-        '',
-        '    // --- Chromatic aberration at edges ---',
-        '    float edgeDist = length(centered) * 2.0;',
-        '    float chroma = smoothstep(0.5, 1.0, edgeDist) * 0.006;',
-        '',
-        '    // --- Combine ---',
-        '    float phosphorLum = (phosphor.r + phosphor.g + phosphor.b) / 3.0;',
-        '    float phosphorDark = mix(1.0, phosphorLum, 0.15);',
-        '',
-        '    alpha = (1.0 - phosphorDark) + scanline + cornerDark;',
-        '    alpha = clamp(alpha, 0.0, 0.65);',
-        '',
-        '    // Phosphor color tint',
-        '    color = (vec3(1.0) - phosphor) * 0.03;',
-        '',
-        '    // Chromatic aberration fringe',
-        '    color.r += chroma * 3.0;',
-        '    color.b += chroma * 2.0;',
-        '',
-        '    // --- Interlace shimmer ---',
-        '    float interlace = mod(floor(px.y) + floor(uTime * 30.0), 2.0);',
-        '    alpha += interlace * 0.008;',
-        '',
-        '    // --- Subtle vertical hold breathing ---',
-        '    float breathe = sin(uTime * 0.7) * 0.002 + sin(uTime * 1.3 + uv.y * 6.0) * 0.001;',
-        '    alpha += abs(breathe) * 0.2;',
-        '',
-        '    gl_FragColor = vec4(color, alpha);',
-        '}',
-    ].join('\n');
+    // Pure overlay — darkens and tints content underneath.
+    var FRAG_SRC = `
+precision mediump float;
+uniform vec2 uResolution;
+uniform float uTime;
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    uv.y = 1.0 - uv.y;
+    vec2 px = uv * uResolution;
+
+    float alpha = 0.0;
+    vec3 color = vec3(0.0);
+
+    // --- Scanlines (heavy, clearly visible) ---
+    float scanY = px.y + sin(uTime * 0.4 + uv.x * 4.0) * 0.8;
+    float scanPhase = mod(scanY, 3.0) / 3.0;
+    float scanline = smoothstep(0.3, 0.7, scanPhase) * 0.28;
+
+    // --- RGB Phosphor Shadow Mask (round dots with dark gaps) ---
+    float maskScale = 4.0; // 4px per dot = chunkier, more visible
+    float row = floor(px.y / maskScale);
+    float xOffset = mod(row, 2.0) * maskScale * 1.5;
+    float subPixel = mod(px.x + xOffset, maskScale * 3.0);
+
+    // Which sub-pixel color
+    vec3 phosphor;
+    if (subPixel < maskScale) {
+        phosphor = vec3(1.0, 0.0, 0.0);
+    } else if (subPixel < maskScale * 2.0) {
+        phosphor = vec3(0.0, 1.0, 0.0);
+    } else {
+        phosphor = vec3(0.0, 0.0, 1.0);
+    }
+
+    // Round dot shape — dark gaps between phosphor dots
+    float withinSubX = mod(subPixel, maskScale);
+    float withinSubY = mod(px.y, maskScale);
+    float dx = withinSubX / maskScale - 0.5;
+    float dy = withinSubY / maskScale - 0.5;
+    float dotDist = sqrt(dx * dx + dy * dy);
+    float dotMask = 1.0 - smoothstep(0.28, 0.48, dotDist);
+    phosphor *= dotMask;
+
+    // --- CRT tube vignette (strong barrel-curve edge darkening) ---
+    vec2 centered = uv - 0.5;
+    float r2 = dot(centered, centered);
+    float barrel = r2 + r2 * r2 * 0.8;
+    float vig = 1.0 - barrel * 3.5;
+    vig = clamp(vig, 0.0, 1.0);
+    vig = pow(vig, 0.5);
+    float cornerDark = pow(1.0 - vig, 1.6) * 0.9;
+
+    // --- Chromatic aberration (visible color fringing at edges) ---
+    float edgeDist = length(centered) * 2.0;
+    float chroma = smoothstep(0.25, 0.85, edgeDist);
+
+    // --- Combine ---
+    // Phosphor: darken where dots are off (gaps between round dots)
+    float phosphorLum = (phosphor.r + phosphor.g + phosphor.b) / 3.0;
+    float phosphorDark = (1.0 - phosphorLum) * 0.25;
+
+    alpha = phosphorDark + scanline + cornerDark;
+    alpha = clamp(alpha, 0.0, 0.88);
+
+    // Chromatic aberration: visible red/cyan fringe at screen edges
+    color.r += chroma * 0.08;
+    color.b += chroma * 0.05;
+
+    // Phosphor color tint (subtle color cast from dot pattern)
+    color += (vec3(1.0) - phosphor) * 0.015;
+
+    // --- Interlace shimmer (every other line flickers) ---
+    float interlace = mod(floor(px.y) + floor(uTime * 30.0), 2.0);
+    alpha += interlace * 0.025;
+
+    // --- Vertical hold breathing (screen subtly wobbles) ---
+    float breathe = sin(uTime * 0.5) * 0.004 + sin(uTime * 1.1 + uv.y * 8.0) * 0.002;
+    alpha += abs(breathe) * 0.4;
+
+    gl_FragColor = vec4(color, alpha);
+}
+`;
 
     // ---- WebGL setup ----
 

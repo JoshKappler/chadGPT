@@ -27,8 +27,8 @@ body {
     cursor: default;
     /* Dark bezel around the CRT screen */
     padding: 6px;
-    /* Perspective gives the CRT screen a subtle 3D depth feel */
-    perspective: 1800px;
+    /* Perspective gives the CRT screen a 3D depth feel — center closer, edges recede */
+    perspective: 900px;
     perspective-origin: 50% 50%;
 }
 
@@ -43,10 +43,10 @@ body {
     overflow: hidden;
     border-radius: 24px;
     background: var(--bg);
-    /* Subtle 3D depth — the screen sits slightly "forward" in the perspective,
-       making edges recede and center feel closer. Not true barrel distortion,
-       but combined with the shader vignette it sells the curved glass illusion. */
-    transform: translateZ(12px);
+    /* 3D depth — the screen sits "forward" in perspective space, making
+       edges recede and center bulge toward viewer. Combined with the heavy
+       shader vignette, this sells the curved CRT glass illusion. */
+    transform: translateZ(30px);
     transform-style: flat;
     /* Visible bezel border — dark grey frame around the screen */
     border: 3px solid #111;
