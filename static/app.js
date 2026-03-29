@@ -282,8 +282,9 @@ function _playNext() {
         el.play().catch(err => { console.warn('[TTS] play failed:', url, err); _advance(); });
     };
     // Fallback: if canplaythrough doesn't fire within 5s, try playing anyway
+    const _expectedSrc = el.src;  // capture resolved src for strict comparison
     setTimeout(() => {
-        if (!_advanced && el.src.includes(url.split('/').pop())) {
+        if (!_advanced && el.src === _expectedSrc) {
             el.oncanplaythrough = null;
             el.play().catch(err => { console.warn('[TTS] play timeout fallback failed:', err); _advance(); });
         }
@@ -1110,15 +1111,14 @@ function gatherVoiceSettings() {
         chaos: parseInt(document.getElementById('voice-chaos').value),
         custom_instruct: document.getElementById('custom-instruct')?.value || '',
         pitch_shift: parseInt(document.getElementById('voice-pitch')?.value || 8),
-        temperature: parseFloat(document.getElementById('voice-temp')?.value || 1.85),
+        temperature: parseFloat(document.getElementById('voice-temp')?.value || 0.85),
         qwen3_speaker: document.getElementById('qwen3-speaker')?.value || 'aiden',
         echo_delay: parseInt(document.getElementById('echo-delay')?.value || 80),
         echo_decay: parseFloat(document.getElementById('echo-decay')?.value || 0.35),
         echo_taps: parseInt(document.getElementById('echo-taps')?.value || 3),
         cfg_scale: cfgVal > 0 ? cfgVal : null,
         ref_audio: document.getElementById('qwen3-ref-audio')?.value || '',
-        ref_text: document.getElementById('qwen3-ref-text')?.value || '',
-        orpheus_voice: document.getElementById('orpheus-voice')?.value || 'leo',
+        ref_text: '',
     };
 }
 
@@ -1168,11 +1168,9 @@ async function loadSavedVoiceSettings() {
         setVal('qwen3-cfg', cfgScale);
         setDisp('cfg-val', cfgScale > 0 ? cfgScale : 'off');
         if (cfg.ref_audio) setVal('qwen3-ref-audio', cfg.ref_audio);
-        if (cfg.ref_text) setVal('qwen3-ref-text', cfg.ref_text);
+        // ref_text: no UI element currently — reserved for future use
         // Toggle engine panels
         var eng = cfg.engine || 'qwen3';
-        var _oe = document.getElementById('orpheus-settings');
-        if (_oe) _oe.style.display = eng === 'orpheus' ? 'block' : 'none';
         document.getElementById('kokoro-settings').style.display = eng === 'kokoro' ? 'block' : 'none';
         document.getElementById('qwen3-advanced').style.display = eng === 'qwen3' ? 'block' : 'none';
     } catch(e) { console.warn('Failed to load voice config:', e); }

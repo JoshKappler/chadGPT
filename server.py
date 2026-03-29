@@ -45,6 +45,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 AUDIO_DIR = Path(tempfile.mkdtemp(prefix="chadgpt_audio_"))
+AUDIO_MAX_AGE_S = 300  # clean up audio files older than 5 minutes
 
 # Active model — read from Modelfile on startup, updated by /api/model/switch
 def _read_model_from_file():
@@ -1316,8 +1317,8 @@ async def boot_ws(websocket: WebSocket):
     boot_steps.append((f"[SYS ] Audio dir: {AUDIO_DIR}", 0.06))
     boot_steps.append((f"[SYS ] Image dir: {IMAGE_DIR}", 0.06))
 
-    # +3 for: model verify, qwen3 load, qwen3 result, final status x2
-    total_steps = len(boot_steps) + 4
+    # +5 for: model verify, qwen3 load, qwen3 result, final status x2
+    total_steps = len(boot_steps) + 5
     step = 0
 
     for line, duration in boot_steps:
@@ -1397,6 +1398,24 @@ async def boot_ws(websocket: WebSocket):
 
     await websocket.send_json({"type": "ready"})
     await websocket.close()
+
+
+async def _cleanup_temp_files():
+    """Periodically delete old audio/image temp files to prevent filling /tmp."""
+    while True:
+        await asyncio.sleep(120)  # run every 2 minutes
+        now = time.time()
+        for d in (AUDIO_DIR, IMAGE_DIR):
+            try:
+                for f in d.iterdir():
+                    if f.is_file() and (now - f.stat().st_mtime) > AUDIO_MAX_AGE_S:
+                        f.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+@app.on_event("startup")
+async def _start_cleanup_task():
+    asyncio.create_task(_cleanup_temp_files())
 
 
 if __name__ == "__main__":

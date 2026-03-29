@@ -687,5 +687,6 @@ var chadAudio = (function () {
         messageBump: messageBump,
         playSubstationSwitch: playSubstationSwitch,
         stop: stop,
+        _getContext: function() { return ctx; },
     };
 })();

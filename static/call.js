@@ -801,8 +801,16 @@ function callStartListening() {
             if (event.results[event.results.length - 1].isFinal) {
                 _callRecognition.stop();
                 if (transcript.trim() && callState === 'connected') {
-                    var input = document.getElementById('chat-input');
-                    if (input) { input.value = transcript; sendMessage(); }
+                    // If Chad is mid-response, wait for streaming to finish before sending
+                    function _trySendCallMessage() {
+                        if (typeof isStreaming !== 'undefined' && isStreaming) {
+                            setTimeout(_trySendCallMessage, 500);
+                            return;
+                        }
+                        var input = document.getElementById('chat-input');
+                        if (input) { input.value = transcript; sendMessage(); }
+                    }
+                    _trySendCallMessage();
                     var tel = document.getElementById('call-transcript');
                     if (tel) tel.textContent = '';
                 }
