@@ -297,6 +297,10 @@ function stopAudio() {
     const el = document.getElementById('chad-audio');
     if (el) { el.oncanplaythrough = null; el.onended = null; el.onerror = null; el.pause(); el.currentTime = 0; }
     if (chadAvatar) chadAvatar.stopTalking();
+    // Notify call system that audio stopped so it can resume listening
+    if (typeof callState !== 'undefined' && callState === 'connected') {
+        setTimeout(function() { if (typeof callStartListening === 'function') callStartListening(); }, 600);
+    }
 }
 
 // ============ BOOT ============
@@ -902,10 +906,18 @@ async function triggerIdleTaunt() {
 
     _idleTaunting = true;
     try {
+        // Grab recent chat messages so Chad can reference the conversation
+        const msgs = document.querySelectorAll('#chat-messages .message');
+        const recentMsgs = [];
+        for (let i = Math.max(0, msgs.length - 6); i < msgs.length; i++) {
+            const el = msgs[i];
+            const role = el.classList.contains('user') ? 'user' : 'chad';
+            recentMsgs.push({ role, text: el.textContent.substring(0, 200) });
+        }
         const resp = await fetch('/api/taunt', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ taunt_count: _idleTauntCount }),
+            body: JSON.stringify({ taunt_count: _idleTauntCount, recent: recentMsgs }),
         });
         const data = await resp.json();
 

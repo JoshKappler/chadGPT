@@ -248,9 +248,7 @@ def boost_volume(audio_path: str, target_peak: float = 0.98):
 
 
 # Emotion presets: maps irritation level to voice instruct descriptions
-# NOTE: The 0.6B CustomVoice model does NOT officially support instruct —
-# only the 1.7B model does. These are kept minimal in case they have any
-# marginal effect, but the real voice character comes from speaker + pitch + echo.
+# The 1.7B CustomVoice model fully supports instruct for emotional control.
 EMOTION_PRESETS = [
     (0, 15, "Deep male voice, calm."),
     (16, 35, "Deep male voice, cold."),
@@ -331,7 +329,7 @@ class KokoroBackend:
 class Qwen3TTSBackend:
     """Qwen3-TTS via mlx-audio. Genuine emotional voice."""
 
-    MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit"
+    MODEL_ID = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
 
     def __init__(self):
         self.model = None
@@ -483,7 +481,7 @@ class Qwen3TTSBackend:
     def synthesize_sentence(self, text: str, output_path: str, voice_config: dict, angry: bool = False) -> bool:
         """Synthesize a single sentence with post-processing.
         Used by the streaming TTS pipeline to process sentences as they arrive.
-        Long text is split at clause boundaries to prevent the 0.6B model from
+        Long text is split at clause boundaries to prevent the model from
         degenerating on long inputs."""
         if not self.ready:
             return False
@@ -513,7 +511,7 @@ class Qwen3TTSBackend:
             ref_text = voice_config.get("ref_text", "").strip() or None
 
             # Split long text into chunks at clause boundaries to prevent
-            # the 0.6B model from cutting off or degenerating
+            # the model from cutting off or degenerating
             MAX_CHUNK_CHARS = 200
             if len(text) > MAX_CHUNK_CHARS:
                 # Split at commas, semicolons, colons, dashes, or sentence-enders

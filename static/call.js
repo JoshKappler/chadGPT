@@ -541,28 +541,21 @@ function updateDialDisplay() {
 function setupCallAnalysers() {
     var ctx = _callCtx();
 
-    if (!_callChadSource) {
+    if (!_callAnalyserChad) {
         // Ensure shared audio context + source are set up (from app.js)
         if (typeof _ensureSharedAudio === 'function') _ensureSharedAudio();
         if (typeof sharedChadSource !== 'undefined' && sharedChadSource) {
-            _callChadSource = sharedChadSource;
-            _callAnalyserChad = ctx.createAnalyser();
-            _callAnalyserChad.fftSize = 256;
-            _callChadSource.connect(_callAnalyserChad);
-        } else {
-            var el = document.getElementById('chad-audio');
-            if (el) {
-                try {
-                    _callChadSource = ctx.createMediaElementSource(el);
-                    _callAnalyserChad = ctx.createAnalyser();
-                    _callAnalyserChad.fftSize = 256;
-                    _callChadSource.connect(_callAnalyserChad);
-                    _callAnalyserChad.connect(ctx.destination);
-                } catch(e) {
-                    console.warn('[CALL] Chad audio source already connected:', e.message);
-                }
+            try {
+                _callChadSource = sharedChadSource;
+                _callAnalyserChad = ctx.createAnalyser();
+                _callAnalyserChad.fftSize = 256;
+                _callChadSource.connect(_callAnalyserChad);
+            } catch(e) {
+                console.warn('[CALL] Chad analyser connect failed:', e.message);
             }
         }
+        // If shared source isn't available yet, retry next frame — don't try
+        // to create a second MediaElementSource (causes InvalidStateError)
     }
 
     if (!_callMicStream) {
@@ -781,6 +774,10 @@ function callStartListening() {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) return;
     if (_callRecognizing || callState !== 'connected') return;
 
+    // Set recognizing immediately so the canvas shows "LISTENING..." without
+    // waiting for the async onstart callback (eliminates "YOUR TURN" flicker)
+    _callRecognizing = true;
+
     if (!_callRecognition) {
         var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
         _callRecognition = new SR();
@@ -819,12 +816,14 @@ function callStartListening() {
         _callRecognition.onend = function() { _callRecognizing = false; };
         _callRecognition.onerror = function(event) {
             _callRecognizing = false;
-            if (event.error === 'no-speech' && callState === 'connected') {
-                setTimeout(function() { callStartListening(); }, 500);
+            // Retry on any recoverable error during a call, not just no-speech
+            if (callState === 'connected') {
+                var retryDelay = event.error === 'no-speech' ? 500 : 1500;
+                setTimeout(function() { callStartListening(); }, retryDelay);
             }
         };
     }
-    try { _callRecognition.start(); } catch(e) {}
+    try { _callRecognition.start(); } catch(e) { _callRecognizing = false; }
 }
 
 function callStopListening() {

@@ -680,15 +680,65 @@ def get_irritation_context(msg_count: int) -> str:
 
 @app.post("/api/taunt")
 async def get_taunt(request: Request):
-    """Return a random idle taunt with TTS, escalating based on taunt count."""
+    """Return an idle taunt with TTS, escalating based on taunt count.
+
+    If recent chat messages are provided, uses the LLM to generate a
+    context-aware taunt referencing the conversation. Falls back to
+    static taunts if the LLM fails or takes too long.
+    """
     data = await request.json()
     taunt_count = data.get("taunt_count", 0)
+    recent = data.get("recent", [])
 
-    # Pick from appropriate tier
     tier = min(taunt_count, len(IDLE_TAUNTS) - 1)
-    taunt = random.choice(IDLE_TAUNTS[tier])
+    taunt = None
 
-    # Generate TTS using saved user config — no overrides
+    # Try LLM-generated taunt if we have conversation context
+    if recent:
+        try:
+            # Build a summary of recent conversation for context
+            convo_lines = "\n".join(
+                f"{'User' if m.get('role') == 'user' else 'You'}: {m.get('text', '')}"
+                for m in recent[-6:]
+            )
+            irritation = ["mildly annoyed", "getting irritated", "genuinely pissed off"][tier]
+            taunt_prompt = (
+                f"The user has been ignoring you for over a minute. You're {irritation}.\n"
+                f"Here's what was said recently:\n{convo_lines}\n\n"
+                "React to being ignored. Reference the conversation topic if relevant. "
+                "Be yourself — cocky, dismissive, insecure-bro energy. "
+                "You can use groans, grunts, scoffs, and noises like 'Ugh', 'Pfft', "
+                "'Tch', 'Mmm', 'Heh', 'Grrrr', etc. Mix speech with these sounds. "
+                "One to two short sentences max. No emojis. No markdown. No asterisks."
+            )
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model": _active_model,
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": taunt_prompt},
+                        ],
+                        "stream": False,
+                        "options": {**_MODEL_OPTIONS, "num_predict": 60},
+                    },
+                    timeout=15,
+                )
+                text = resp.json().get("message", {}).get("content", "").strip()
+                text = re.sub(r'\*[^*]+\*', '', text).replace('#', '').replace('`', '').strip()
+                if text and len(text) > 3:
+                    taunt = text
+                    logger.info(f"Taunt (LLM, tier {tier}): {taunt[:80]}")
+        except Exception as e:
+            logger.warning(f"LLM taunt failed, using static: {e}")
+
+    # Fall back to static taunts
+    if not taunt:
+        taunt = random.choice(IDLE_TAUNTS[tier])
+        logger.info(f"Taunt (static, tier {tier}): {taunt[:60]}")
+
+    # Generate TTS
     audio_id = str(uuid.uuid4())
     audio_path = str(AUDIO_DIR / f"{audio_id}.wav")
     loop = asyncio.get_running_loop()
