@@ -456,7 +456,11 @@ class FlickerEffect {
      * wraps around, and resettles. Like bumping the tracking knob on a VCR.
      * Horizontal distortion bands appear during the roll.
      *
-     * @param {number} rolls - how many full or partial screen-heights to roll (default 1.0 = full roll)
+     * Uses a tall wrapper (2x screen height) with two copies of the content
+     * stacked vertically, then translates the wrapper so it scrolls through
+     * #crt-screen's overflow:hidden viewport. This gives seamless wrapping.
+     *
+     * @param {number} rolls - how many screen-heights to roll (default 1.0)
      * @param {number} duration - roll duration in ms (default 1200)
      */
     verticalRoll(rolls = 1.0, duration = 1200) {
@@ -464,66 +468,80 @@ class FlickerEffect {
         const app = document.getElementById('app');
         if (!screen || !app) return;
 
-        // Create a clone of #app to fill the gap during the roll
-        const clone = app.cloneNode(true);
-        clone.id = 'app-roll-clone';
-        clone.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:45;';
-        // Remove interactive elements from clone
-        clone.querySelectorAll('input,button,textarea,select').forEach(el => el.setAttribute('tabindex', '-1'));
-        screen.appendChild(clone);
+        const screenH = screen.clientHeight;
 
-        // Create horizontal distortion overlay (wavy bands during roll)
+        // Hide the real app and create a rolling wrapper with two copies
+        app.style.visibility = 'hidden';
+
+        const wrapper = document.createElement('div');
+        wrapper.id = 'vhs-roll-wrapper';
+        wrapper.style.cssText = 'position:absolute;top:0;left:0;right:0;z-index:46;pointer-events:none;will-change:transform;';
+
+        // Two copies stacked: when we translate up, the bottom copy scrolls into view
+        const copy1 = app.cloneNode(true);
+        const copy2 = app.cloneNode(true);
+        copy1.removeAttribute('id');
+        copy2.removeAttribute('id');
+        copy1.style.cssText = 'height:' + screenH + 'px;overflow:hidden;visibility:visible;pointer-events:none;';
+        copy2.style.cssText = 'height:' + screenH + 'px;overflow:hidden;visibility:visible;pointer-events:none;';
+        // Disable interactivity on clones
+        [copy1, copy2].forEach(c => c.querySelectorAll('input,button,textarea,select').forEach(el => {
+            el.setAttribute('tabindex', '-1');
+            el.style.pointerEvents = 'none';
+        }));
+
+        wrapper.appendChild(copy1);
+        wrapper.appendChild(copy2);
+        screen.appendChild(wrapper);
+
+        // Horizontal distortion overlay
         const distortion = document.createElement('div');
         distortion.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:9999;overflow:hidden;';
         screen.appendChild(distortion);
 
-        const dir = Math.random() > 0.5 ? 1 : -1;
-        const totalPx = screen.clientHeight * rolls;
         const t0 = performance.now();
 
         // Static spike during roll
         if (typeof staticEffect !== 'undefined') {
-            staticEffect.spike(0.2, duration);
+            staticEffect.spike(0.25, duration);
         }
 
         const rollFrame = () => {
             const elapsed = performance.now() - t0;
             const progress = Math.min(elapsed / duration, 1.0);
 
-            // Ease-in-out for natural tracking feel
+            // Ease-in-out
             const ease = progress < 0.5
                 ? 2 * progress * progress
                 : 1 - Math.pow(-2 * progress + 2, 2) / 2;
 
-            const offset = ease * totalPx * dir;
-            const screenH = screen.clientHeight;
+            // Scroll amount: negative = scroll upward (content moves up, bottom copy enters)
+            const offset = ease * screenH * rolls;
+            wrapper.style.transform = 'translateY(' + (-offset) + 'px)';
 
-            // Wrap offset to screen height
-            const wrappedOffset = ((offset % screenH) + screenH) % screenH;
-            const shiftDir = dir > 0 ? 1 : -1;
-
-            // Position both copies so one fills the gap left by the other
-            app.style.transform = `translateY(${shiftDir * wrappedOffset}px)`;
-            clone.style.transform = `translateY(${shiftDir * (wrappedOffset - screenH)}px)`;
-
-            // Horizontal distortion bands that travel with the seam
-            const seamY = (wrappedOffset / screenH) * 100;
+            // Horizontal distortion bands at the seam between the two copies
+            const seamPx = screenH - offset % screenH;
+            const seamPct = (seamPx / screenH) * 100;
             let bandHtml = '';
-            for (let i = -3; i <= 3; i++) {
-                const bandY = seamY + i * 4;
-                const xOff = Math.sin((elapsed / 50) + i * 1.5) * (15 + Math.abs(i) * 8);
-                bandHtml += `<div style="position:absolute;top:${bandY}%;height:4%;left:0;right:0;transform:translateX(${xOff}px);background:rgba(0,255,65,0.04);border-top:1px solid rgba(0,255,65,0.12);"></div>`;
+            for (let i = -4; i <= 4; i++) {
+                const bandY = seamPct + i * 3;
+                const xOff = Math.sin((elapsed / 40) + i * 1.2) * (20 + Math.abs(i) * 10);
+                bandHtml += '<div style="position:absolute;top:' + bandY + '%;height:3%;left:0;right:0;' +
+                    'transform:translateX(' + xOff + 'px);' +
+                    'background:rgba(0,255,65,0.06);' +
+                    'border-top:1px solid rgba(0,255,65,0.15);' +
+                    'border-bottom:1px solid rgba(0,255,65,0.08);"></div>';
             }
             // Bright seam line
-            bandHtml += `<div style="position:absolute;top:${seamY - 0.5}%;height:1%;left:0;right:0;background:rgba(255,255,255,0.08);"></div>`;
+            bandHtml += '<div style="position:absolute;top:' + (seamPct - 0.3) + '%;height:0.6%;left:0;right:0;background:rgba(255,255,255,0.12);"></div>';
             distortion.innerHTML = bandHtml;
 
             if (progress < 1.0) {
                 requestAnimationFrame(rollFrame);
             } else {
-                // Settle: snap back and clean up
-                app.style.transform = '';
-                clone.remove();
+                // Clean up: restore real app
+                app.style.visibility = '';
+                wrapper.remove();
                 distortion.remove();
             }
         };
