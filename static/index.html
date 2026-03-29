@@ -11,6 +11,10 @@
 </head>
 <body>
 <div id="crt-screen">
+  <!-- Content wrapper: SVG barrel distortion filter applied here.
+       The WebGL CRT overlay canvas is appended OUTSIDE this wrapper
+       (directly to #crt-screen) so it isn't affected by the filter. -->
+  <div id="crt-content">
     <canvas id="static-overlay"></canvas>
     <div id="scanlines"></div>
     <div id="flicker-overlay"></div>
@@ -321,13 +325,14 @@
     </div>
 
     <div id="dim-overlay"></div>
+  </div><!-- /crt-content -->
 
-    <script src="/static/effects.js?v=80"></script>
-    <script src="/static/audio.js?v=80"></script>
-    <script src="/static/app.js?v=80"></script>
-    <script src="/static/call.js?v=80"></script>
-    <script src="/static/chad3d.js?v=80"></script>
-    <script src="/static/crt.js?v=80"></script>
+    <script src="/static/effects.js?v=85"></script>
+    <script src="/static/audio.js?v=85"></script>
+    <script src="/static/app.js?v=85"></script>
+    <script src="/static/call.js?v=85"></script>
+    <script src="/static/chad3d.js?v=85"></script>
+    <script src="/static/crt.js?v=85"></script>
 </div><!-- /crt-screen -->
 </body>
 </html>

@@ -1,8 +1,14 @@
 /**
- * CRT Post-Processing Overlay
+ * CRT Post-Processing: Barrel Distortion + Overlay Effects
  *
- * Fullscreen WebGL canvas rendering CRT glass effects on top of all content.
- * Pure alpha overlay — darkens only, never adds opaque color.
+ * Two-layer approach:
+ * 1. SVG displacement filter on #crt-content — actually warps/bulges the
+ *    page content like curved CRT glass (barrel distortion).
+ * 2. WebGL overlay canvas on #crt-screen — renders scanlines, phosphor
+ *    grid, and vignette on top.
+ *
+ * The WebGL canvas sits OUTSIDE #crt-content so the SVG filter doesn't
+ * affect it (CSS filter on WebGL canvas ancestors can blank the canvas).
  */
 
 var crtOverlay = (function() {
@@ -14,57 +20,105 @@ var crtOverlay = (function() {
     var _animFrame = null;
     var _enabled = true;
 
-    var VERT_SRC = 'attribute vec2 aPos; void main(){gl_Position=vec4(aPos,0.0,1.0);}';
+    // ---- Barrel Distortion (SVG displacement filter) ----
+
+    function initBarrelDistortion() {
+        var content = document.getElementById('crt-content');
+        if (!content) return;
+
+        // Generate a displacement map: encodes barrel distortion as pixel colors.
+        // R channel = X displacement, G channel = Y displacement.
+        // 128 = no displacement, <128 = negative, >128 = positive.
+        var size = 512;
+        var mapCanvas = document.createElement('canvas');
+        mapCanvas.width = size;
+        mapCanvas.height = size;
+        var ctx = mapCanvas.getContext('2d');
+        var img = ctx.createImageData(size, size);
+        var d = img.data;
+
+        var strength = 0.35; // distortion intensity
+
+        for (var y = 0; y < size; y++) {
+            for (var x = 0; x < size; x++) {
+                // Normalized coords: -1 to 1
+                var nx = (x / (size - 1)) * 2.0 - 1.0;
+                var ny = (y / (size - 1)) * 2.0 - 1.0;
+
+                // Barrel distortion: displacement = position * r^2
+                var r2 = nx * nx + ny * ny;
+                var dx = nx * r2 * strength;
+                var dy = ny * r2 * strength;
+
+                // Encode: 0.5 maps to 128 (no displacement)
+                var r = Math.round(Math.max(0, Math.min(255, (0.5 + dx * 0.5) * 255)));
+                var g = Math.round(Math.max(0, Math.min(255, (0.5 + dy * 0.5) * 255)));
+
+                var i = (y * size + x) * 4;
+                d[i]     = r;
+                d[i + 1] = g;
+                d[i + 2] = 128;
+                d[i + 3] = 255;
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+        var dataURL = mapCanvas.toDataURL('image/png');
+
+        // Create SVG filter element
+        var svgNS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(svgNS, 'svg');
+        svg.setAttribute('style', 'position:absolute;width:0;height:0');
+        svg.innerHTML =
+            '<defs>' +
+              '<filter id="crt-barrel" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">' +
+                '<feImage href="' + dataURL + '" result="map" preserveAspectRatio="none" ' +
+                  'x="0%" y="0%" width="100%" height="100%" />' +
+                '<feDisplacementMap in="SourceGraphic" in2="map" ' +
+                  'scale="60" xChannelSelector="R" yChannelSelector="G" />' +
+              '</filter>' +
+            '</defs>';
+        document.body.insertBefore(svg, document.body.firstChild);
+
+        // Apply filter to content wrapper
+        content.style.filter = 'url(#crt-barrel)';
+    }
+
+    // ---- WebGL Overlay (scanlines, phosphor, vignette) ----
+
+    var VERT_SRC = 'attribute vec2 a;void main(){gl_Position=vec4(a,0,1);}';
 
     var FRAG_SRC = `
 precision mediump float;
-uniform vec2 uResolution;
+uniform vec2 uRes;
 uniform float uTime;
 
 void main() {
-    vec2 uv = gl_FragCoord.xy / uResolution;
+    vec2 uv = gl_FragCoord.xy / uRes;
     uv.y = 1.0 - uv.y;
-    vec2 px = uv * uResolution;
+    vec2 px = uv * uRes;
 
-    // ---- Scanlines ----
-    // Every 2px: 1px lit, 1px dark. Slight wobble.
+    // Scanlines: every 2px, 1px dark band
     float scanY = px.y + sin(uTime * 0.3 + uv.x * 5.0) * 0.4;
-    float scanBand = mod(scanY, 2.0);
-    float scanline = step(1.0, scanBand) * 0.15;
+    float scan = step(1.0, mod(scanY, 2.0)) * 0.13;
 
-    // ---- Phosphor dot grid ----
-    // Subtle RGB phosphor texture. Visible on close inspection but
-    // doesn't obscure content. 3px pitch, triangular offset.
+    // Phosphor gap grid: thin dark lines at 3px pitch
     float pitch = 3.0;
     float pRow = floor(px.y / pitch);
-    float pOff = mod(pRow, 2.0) * pitch * 0.5;
-    float pCol = mod(px.x + pOff, pitch * 3.0) / pitch;
-    // Darken the gaps between phosphor columns
-    float gapX = mod(px.x + pOff, pitch);
-    float gapY = mod(px.y, pitch);
-    float gap = step(pitch - 0.6, gapX) + step(pitch - 0.6, gapY);
-    float phosphor = gap * 0.06;
+    float gx = step(pitch - 0.6, mod(px.x + mod(pRow, 2.0) * pitch * 0.5, pitch));
+    float gy = step(pitch - 0.6, mod(px.y, pitch));
+    float phosphor = (gx + gy) * 0.05;
 
-    // ---- Vignette (dark edges, pure black) ----
+    // Vignette: barrel-curve darkening
     vec2 c = uv - 0.5;
     float r2 = dot(c, c);
-    // Barrel-shaped: r^2 + r^4 for CRT curve profile
     float v = r2 * 1.8 + r2 * r2 * 2.5;
-    float vignette = clamp(v, 0.0, 1.0);
-    // Pow to shape the falloff — most of screen is clear, edges darken fast
-    vignette = pow(vignette, 0.8) * 0.7;
+    float vig = pow(clamp(v, 0.0, 1.0), 0.8) * 0.65;
 
-    // ---- Combine: all effects are just darkening (black with alpha) ----
-    float dark = scanline + phosphor + vignette;
-
-    // Interlace: alternate lines shimmer very slightly
+    // Interlace shimmer
     float interlace = mod(floor(px.y) + floor(uTime * 25.0), 2.0) * 0.01;
-    dark += interlace;
 
-    dark = clamp(dark, 0.0, 0.92);
-
-    // Output pure black with varying alpha — darkens the content underneath
-    gl_FragColor = vec4(0.0, 0.0, 0.0, dark);
+    float dark = scan + phosphor + vig + interlace;
+    gl_FragColor = vec4(0.0, 0.0, 0.0, clamp(dark, 0.0, 0.9));
 }
 `;
 
@@ -77,10 +131,11 @@ void main() {
 
         var screen = document.getElementById('crt-screen');
         if (!screen) return false;
+        // Append directly to #crt-screen, NOT inside #crt-content
         screen.appendChild(canvas);
 
         gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: false });
-        if (!gl) { console.warn('[CRT] WebGL not available'); return false; }
+        if (!gl) return false;
 
         var vs = compile(gl.VERTEX_SHADER, VERT_SRC);
         var fs = compile(gl.FRAGMENT_SHADER, FRAG_SRC);
@@ -90,10 +145,7 @@ void main() {
         gl.attachShader(program, vs);
         gl.attachShader(program, fs);
         gl.linkProgram(program);
-        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-            console.error('[CRT] Link:', gl.getProgramInfoLog(program));
-            return false;
-        }
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
         gl.useProgram(program);
 
         var buf = gl.createBuffer();
@@ -101,12 +153,12 @@ void main() {
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
             -1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1
         ]), gl.STATIC_DRAW);
-        var a = gl.getAttribLocation(program, 'aPos');
+        var a = gl.getAttribLocation(program, 'a');
         gl.enableVertexAttribArray(a);
         gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
 
         uTime = gl.getUniformLocation(program, 'uTime');
-        uResolution = gl.getUniformLocation(program, 'uResolution');
+        uResolution = gl.getUniformLocation(program, 'uRes');
 
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -121,7 +173,7 @@ void main() {
         gl.shaderSource(s, src);
         gl.compileShader(s);
         if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-            console.error('[CRT] Shader:', gl.getShaderInfoLog(s));
+            console.error('[CRT]', gl.getShaderInfoLog(s));
             return null;
         }
         return s;
@@ -153,12 +205,16 @@ void main() {
         start: function() {
             if (_animFrame) return;
             _enabled = true;
+            initBarrelDistortion();
             if (!gl && !initGL()) return;
             render();
         },
         stop: function() {
             _enabled = false;
             if (_animFrame) { cancelAnimationFrame(_animFrame); _animFrame = null; }
+            // Remove barrel distortion filter
+            var content = document.getElementById('crt-content');
+            if (content) content.style.filter = '';
         },
         setEnabled: function(v) {
             _enabled = !!v;
