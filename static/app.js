@@ -532,7 +532,7 @@ function startAmbientVisualGlitches() {
                     chadAudio.play8bitStinger();
                     setTimeout(() => chadAudio.play8bitNoise(), 80);
                 }
-            } else {
+            } else if (r < 0.98) {
                 // Heavy compound glitch — 8-bit + analog combined
                 flickerEffect.glitchBurst(2);
                 staticEffect.spike(0.2, 250);
@@ -542,6 +542,13 @@ function startAmbientVisualGlitches() {
                     setTimeout(() => chadAudio.play8bitNoise(), 150);
                 }
                 setTimeout(() => flickerEffect.glitchScreen(), 150);
+            } else {
+                // VHS VERTICAL ROLL — full screen tracking loss (rare, dramatic)
+                flickerEffect.verticalRoll(1.0, 1000 + Math.random() * 800);
+                if (typeof chadAudio !== 'undefined') {
+                    chadAudio.playTapeWarble();
+                    setTimeout(() => chadAudio.playHeadSwitch(), 500);
+                }
             }
             scheduleNext();
         }, delay);

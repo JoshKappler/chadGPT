@@ -450,6 +450,86 @@ class FlickerEffect {
             setTimeout(() => this.glitchScreen(), i * 60 + Math.random() * 40);
         }
     }
+
+    /**
+     * VHS FULL VERTICAL ROLL — the entire screen scrolls down (or up),
+     * wraps around, and resettles. Like bumping the tracking knob on a VCR.
+     * Horizontal distortion bands appear during the roll.
+     *
+     * @param {number} rolls - how many full or partial screen-heights to roll (default 1.0 = full roll)
+     * @param {number} duration - roll duration in ms (default 1200)
+     */
+    verticalRoll(rolls = 1.0, duration = 1200) {
+        const screen = document.getElementById('crt-screen');
+        const app = document.getElementById('app');
+        if (!screen || !app) return;
+
+        // Create a clone of #app to fill the gap during the roll
+        const clone = app.cloneNode(true);
+        clone.id = 'app-roll-clone';
+        clone.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:45;';
+        // Remove interactive elements from clone
+        clone.querySelectorAll('input,button,textarea,select').forEach(el => el.setAttribute('tabindex', '-1'));
+        screen.appendChild(clone);
+
+        // Create horizontal distortion overlay (wavy bands during roll)
+        const distortion = document.createElement('div');
+        distortion.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:9999;overflow:hidden;';
+        screen.appendChild(distortion);
+
+        const dir = Math.random() > 0.5 ? 1 : -1;
+        const totalPx = screen.clientHeight * rolls;
+        const t0 = performance.now();
+
+        // Static spike during roll
+        if (typeof staticEffect !== 'undefined') {
+            staticEffect.spike(0.2, duration);
+        }
+
+        const rollFrame = () => {
+            const elapsed = performance.now() - t0;
+            const progress = Math.min(elapsed / duration, 1.0);
+
+            // Ease-in-out for natural tracking feel
+            const ease = progress < 0.5
+                ? 2 * progress * progress
+                : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+
+            const offset = ease * totalPx * dir;
+            const screenH = screen.clientHeight;
+
+            // Wrap offset to screen height
+            const wrappedOffset = ((offset % screenH) + screenH) % screenH;
+            const shiftDir = dir > 0 ? 1 : -1;
+
+            // Position both copies so one fills the gap left by the other
+            app.style.transform = `translateY(${shiftDir * wrappedOffset}px)`;
+            clone.style.transform = `translateY(${shiftDir * (wrappedOffset - screenH)}px)`;
+
+            // Horizontal distortion bands that travel with the seam
+            const seamY = (wrappedOffset / screenH) * 100;
+            let bandHtml = '';
+            for (let i = -3; i <= 3; i++) {
+                const bandY = seamY + i * 4;
+                const xOff = Math.sin((elapsed / 50) + i * 1.5) * (15 + Math.abs(i) * 8);
+                bandHtml += `<div style="position:absolute;top:${bandY}%;height:4%;left:0;right:0;transform:translateX(${xOff}px);background:rgba(0,255,65,0.04);border-top:1px solid rgba(0,255,65,0.12);"></div>`;
+            }
+            // Bright seam line
+            bandHtml += `<div style="position:absolute;top:${seamY - 0.5}%;height:1%;left:0;right:0;background:rgba(255,255,255,0.08);"></div>`;
+            distortion.innerHTML = bandHtml;
+
+            if (progress < 1.0) {
+                requestAnimationFrame(rollFrame);
+            } else {
+                // Settle: snap back and clean up
+                app.style.transform = '';
+                clone.remove();
+                distortion.remove();
+            }
+        };
+
+        requestAnimationFrame(rollFrame);
+    }
 }
 
 // ============================================================
