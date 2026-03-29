@@ -515,25 +515,48 @@ class FlickerEffect {
                 ? 2 * progress * progress
                 : 1 - Math.pow(-2 * progress + 2, 2) / 2;
 
-            // Scroll amount: negative = scroll upward (content moves up, bottom copy enters)
+            // Scroll amount: negative = scroll upward
             const offset = ease * screenH * rolls;
-            wrapper.style.transform = 'translateY(' + (-offset) + 'px)';
 
-            // Horizontal distortion bands at the seam between the two copies
+            // VHS horizontal wobble: oscillating skew + translateX on the whole
+            // wrapper gives the characteristic diagonal warble where scan lines
+            // aren't aligned horizontally. Amplitude decays as roll settles.
+            const wobbleDecay = 1.0 - progress * 0.7;
+            const skew = Math.sin(elapsed / 60) * 1.2 * wobbleDecay;
+            const xJitter = Math.sin(elapsed / 35) * 8 * wobbleDecay
+                          + Math.sin(elapsed / 17) * 3 * wobbleDecay;
+            wrapper.style.transform = 'translateY(' + (-offset) + 'px) translateX(' + xJitter + 'px) skewX(' + skew + 'deg)';
+
+            // Seam position (where the two copies meet)
             const seamPx = screenH - offset % screenH;
             const seamPct = (seamPx / screenH) * 100;
+
+            // Horizontal distortion bands near the seam — each band is a
+            // horizontal strip with its own X offset, creating the wavy
+            // "bad tracking" look. More bands, wider area, bigger offsets.
             let bandHtml = '';
-            for (let i = -4; i <= 4; i++) {
-                const bandY = seamPct + i * 3;
-                const xOff = Math.sin((elapsed / 40) + i * 1.2) * (20 + Math.abs(i) * 10);
-                bandHtml += '<div style="position:absolute;top:' + bandY + '%;height:3%;left:0;right:0;' +
+            for (let i = -8; i <= 8; i++) {
+                const bandY = seamPct + i * 2.5;
+                if (bandY < -5 || bandY > 105) continue;
+                // Each band wobbles independently — phase offset per band
+                const xOff = Math.sin((elapsed / 30) + i * 0.9) * (25 + Math.abs(i) * 12)
+                           + Math.sin((elapsed / 18) + i * 2.1) * 8;
+                // Bands closer to seam are more opaque and have more offset
+                const dist = Math.abs(i);
+                const alpha = Math.max(0.02, 0.12 - dist * 0.01);
+                const borderAlpha = Math.max(0.05, 0.2 - dist * 0.015);
+                bandHtml += '<div style="position:absolute;top:' + bandY + '%;height:2.5%;left:-30px;right:-30px;' +
                     'transform:translateX(' + xOff + 'px);' +
-                    'background:rgba(0,255,65,0.06);' +
-                    'border-top:1px solid rgba(0,255,65,0.15);' +
-                    'border-bottom:1px solid rgba(0,255,65,0.08);"></div>';
+                    'background:rgba(0,255,65,' + alpha + ');' +
+                    'border-top:1px solid rgba(0,255,65,' + borderAlpha + ');"></div>';
             }
-            // Bright seam line
-            bandHtml += '<div style="position:absolute;top:' + (seamPct - 0.3) + '%;height:0.6%;left:0;right:0;background:rgba(255,255,255,0.12);"></div>';
+            // Bright seam line — the head switch bar
+            bandHtml += '<div style="position:absolute;top:' + (seamPct - 0.4) + '%;height:0.8%;left:0;right:0;' +
+                'background:linear-gradient(90deg, rgba(255,255,255,0.06), rgba(255,255,255,0.15), rgba(255,255,255,0.06));"></div>';
+            // Noise burst near seam
+            bandHtml += '<div style="position:absolute;top:' + (seamPct - 3) + '%;height:6%;left:0;right:0;' +
+                'background:repeating-linear-gradient(0deg, transparent, transparent 1px, rgba(0,255,65,0.03) 1px, rgba(0,255,65,0.03) 2px);' +
+                'opacity:0.8;"></div>';
             distortion.innerHTML = bandHtml;
 
             if (progress < 1.0) {
