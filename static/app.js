@@ -73,6 +73,9 @@ function playSoundFile(url) {
 async function powerOn() {
     powered = true;
 
+    // Start CRT overlay (phosphor dots, scanlines, barrel distortion)
+    if (typeof crtOverlay !== 'undefined') crtOverlay.start();
+
     const app = document.getElementById('app');
     const powerStage = document.getElementById('power-stage');
 
@@ -959,6 +962,8 @@ async function powerOff() {
         avatarGlitchSystem.stop();
         avatarGlitchSystem._bootAssembly = false;
     }
+    // Stop CRT overlay
+    if (typeof crtOverlay !== 'undefined') crtOverlay.stop();
 
     // ---- VHS TAPE EJECT EFFECT ----
     // Heavy static + tracking artifacts scrolling up
