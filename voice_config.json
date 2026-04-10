@@ -8,11 +8,11 @@
   "custom_instruct": "",
   "qwen3_speaker": "ryan",
   "pitch_shift": 4,
-  "temperature": 0.5,
+  "temperature": 0.75,
   "echo_delay": 60,
   "echo_decay": 0.35,
   "echo_taps": 2,
-  "cfg_scale": 0,
+  "cfg_scale": null,
   "ref_audio": "",
   "ref_text": ""
 }

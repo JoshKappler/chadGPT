@@ -58,7 +58,11 @@ def _read_model_from_file():
 _active_model = _read_model_from_file()
 
 # System prompt — injected as first message in every chat (not baked into Ollama model)
-SYSTEM_PROMPT = Path("Modelfile").read_text().split('SYSTEM """')[1].split('"""')[0].strip() if 'SYSTEM """' in Path("Modelfile").read_text() else ""
+try:
+    _modelfile_text = Path("Modelfile").read_text()
+    SYSTEM_PROMPT = _modelfile_text.split('SYSTEM """')[1].split('"""')[0].strip() if 'SYSTEM """' in _modelfile_text else ""
+except Exception:
+    SYSTEM_PROMPT = ""
 
 # Few-shot examples from MESSAGE directives — injected after system prompt, before user conversation
 def _parse_fewshot_messages():
@@ -161,10 +165,10 @@ def init_tts_kokoro():
         if kokoro.ready or _tts_kokoro_initializing:
             return
         _tts_kokoro_initializing = True
-    try:
-        kokoro.init(lang_code=voice_config["lang_code"])
-    finally:
-        _tts_kokoro_initializing = False
+        try:
+            kokoro.init(lang_code=voice_config["lang_code"])
+        finally:
+            _tts_kokoro_initializing = False
 
 
 def init_tts_qwen3():
@@ -174,10 +178,10 @@ def init_tts_qwen3():
         if qwen3.ready or _tts_qwen3_initializing:
             return
         _tts_qwen3_initializing = True
-    try:
-        qwen3.init()
-    finally:
-        _tts_qwen3_initializing = False
+        try:
+            qwen3.init()
+        finally:
+            _tts_qwen3_initializing = False
 
 
 def synthesize_speech(text: str, output_path: str, angry: bool = False) -> bool:
@@ -344,16 +348,18 @@ def generate_image(prompt: str, quality: str = None) -> str | None:
         _image_progress["total"] = total_steps
         _image_progress["active"] = True
 
-        with torch.no_grad():
-            result = pipe(
-                prompt,
-                num_inference_steps=total_steps,
-                guidance_scale=spec["guidance"],
-                height=gen_size,
-                width=gen_size,
-                callback_on_step_end=_progress_cb,
-            )
-        _image_progress["active"] = False
+        try:
+            with torch.no_grad():
+                result = pipe(
+                    prompt,
+                    num_inference_steps=total_steps,
+                    guidance_scale=spec["guidance"],
+                    height=gen_size,
+                    width=gen_size,
+                    callback_on_step_end=_progress_cb,
+                )
+        finally:
+            _image_progress["active"] = False
 
         img = result.images[0]
 
@@ -585,12 +591,14 @@ async def switch_model(request: Request):
             if new_model not in available:
                 return JSONResponse(content={"ok": False, "error": f"Model '{new_model}' not found in Ollama"})
 
-        # Update active model and persist to Modelfile
+        # Update active model and persist to Modelfile (atomic write)
         _active_model = new_model
         mf = Path("Modelfile").read_text()
         lines = mf.split("\n")
         lines[0] = f"FROM {new_model}"
-        Path("Modelfile").write_text("\n".join(lines))
+        tmp_mf = Path("Modelfile.tmp")
+        tmp_mf.write_text("\n".join(lines))
+        os.replace(str(tmp_mf), "Modelfile")
 
         logger.info(f"Switched to model: {new_model}")
         return JSONResponse(content={"ok": True, "message": f"Switched to {new_model}"})
@@ -855,6 +863,8 @@ async def chat_ws(websocket: WebSocket):
             JUNK = re.compile(r'<\|endoftext\|>|<\|im_start\|>|<\|im_end\|>')
             # Think-block state: suppress content between <think> and </think>
             in_think_block = False
+            # Buffer to handle tags split across token boundaries
+            _tag_buf = ""
 
             # Streaming TTS: fire off synthesis per sentence as they complete
             loop = asyncio.get_running_loop()
@@ -893,27 +903,35 @@ async def chat_ws(websocket: WebSocket):
                             chunk = json.loads(line)
                             token = chunk.get("message", {}).get("content", "")
                             if token:
-                                # Strip think blocks: suppress everything between <think> and </think>
-                                # Handle tags that may span or share tokens
-                                remaining = token
+                                # Strip think blocks: suppress content between <think> and </think>
+                                # Accumulate into _tag_buf so tags split across chunks are found
+                                _tag_buf += token
                                 visible = ""
-                                while remaining:
+
+                                # Process complete tags in the buffer
+                                changed = True
+                                while changed:
+                                    changed = False
                                     if in_think_block:
-                                        end_idx = remaining.find("</think>")
+                                        end_idx = _tag_buf.find("</think>")
                                         if end_idx >= 0:
                                             in_think_block = False
-                                            remaining = remaining[end_idx + len("</think>"):]
-                                        else:
-                                            remaining = ""
+                                            _tag_buf = _tag_buf[end_idx + 8:]
+                                            changed = True
+                                        # else: still thinking, hold entire buffer
                                     else:
-                                        start_idx = remaining.find("<think>")
+                                        start_idx = _tag_buf.find("<think>")
                                         if start_idx >= 0:
-                                            visible += remaining[:start_idx]
+                                            visible += _tag_buf[:start_idx]
                                             in_think_block = True
-                                            remaining = remaining[start_idx + len("<think>"):]
+                                            _tag_buf = _tag_buf[start_idx + 7:]
+                                            changed = True
                                         else:
-                                            visible += remaining
-                                            remaining = ""
+                                            # Flush buffer but keep last 7 chars in case a
+                                            # partial <think> tag straddles the boundary
+                                            safe = max(0, len(_tag_buf) - 7)
+                                            visible += _tag_buf[:safe]
+                                            _tag_buf = _tag_buf[safe:]
 
                                 clean = JUNK.sub("", visible)
                                 if clean:
@@ -934,6 +952,14 @@ async def chat_ws(websocket: WebSocket):
                                 break
                         except json.JSONDecodeError:
                             continue
+
+            # Flush any remaining tag buffer content (not inside a think block)
+            if _tag_buf and not in_think_block:
+                flush_clean = JUNK.sub("", _tag_buf)
+                if flush_clean:
+                    full_response += flush_clean
+                    sentence_buffer += flush_clean
+                    await websocket.send_json({"type": "token", "content": flush_clean})
 
             # Handle any remaining text that didn't end with punctuation
             if sentence_buffer.strip() and len(sentence_buffer.strip()) >= 3:
@@ -1230,22 +1256,25 @@ async def update_voice_config(request: Request):
     new_engine = data.get("engine", voice_config["engine"])
     voice_config["engine"] = new_engine
     voice_config["voice"] = data.get("voice", voice_config["voice"])
-    voice_config["speed"] = float(data.get("speed", voice_config["speed"]))
-    voice_config["angry_speed"] = float(data.get("angry_speed", voice_config["angry_speed"]))
-    voice_config["lang_code"] = data.get("lang_code", voice_config["lang_code"])
-    voice_config["chaos"] = int(data.get("chaos", voice_config["chaos"]))
-    voice_config["custom_instruct"] = data.get("custom_instruct", voice_config["custom_instruct"])
-    voice_config["pitch_shift"] = int(data.get("pitch_shift", voice_config["pitch_shift"]))
-    voice_config["temperature"] = float(data.get("temperature", voice_config["temperature"]))
-    voice_config["qwen3_speaker"] = data.get("qwen3_speaker", voice_config["qwen3_speaker"])
-    voice_config["echo_delay"] = int(data.get("echo_delay", voice_config["echo_delay"]))
-    voice_config["echo_decay"] = float(data.get("echo_decay", voice_config["echo_decay"]))
-    voice_config["echo_taps"] = int(data.get("echo_taps", voice_config["echo_taps"]))
-    # Qwen3 advanced params
-    cfg_val = data.get("cfg_scale", voice_config.get("cfg_scale"))
-    voice_config["cfg_scale"] = float(cfg_val) if cfg_val not in (None, "", "null") else None
-    voice_config["ref_audio"] = data.get("ref_audio", voice_config.get("ref_audio", ""))
-    voice_config["ref_text"] = data.get("ref_text", voice_config.get("ref_text", ""))
+    try:
+        voice_config["speed"] = float(data.get("speed", voice_config["speed"]))
+        voice_config["angry_speed"] = float(data.get("angry_speed", voice_config["angry_speed"]))
+        voice_config["lang_code"] = data.get("lang_code", voice_config["lang_code"])
+        voice_config["chaos"] = int(data.get("chaos", voice_config["chaos"]))
+        voice_config["custom_instruct"] = data.get("custom_instruct", voice_config["custom_instruct"])
+        voice_config["pitch_shift"] = int(data.get("pitch_shift", voice_config["pitch_shift"]))
+        voice_config["temperature"] = float(data.get("temperature", voice_config["temperature"]))
+        voice_config["qwen3_speaker"] = data.get("qwen3_speaker", voice_config["qwen3_speaker"])
+        voice_config["echo_delay"] = int(data.get("echo_delay", voice_config["echo_delay"]))
+        voice_config["echo_decay"] = float(data.get("echo_decay", voice_config["echo_decay"]))
+        voice_config["echo_taps"] = int(data.get("echo_taps", voice_config["echo_taps"]))
+        # Qwen3 advanced params
+        cfg_val = data.get("cfg_scale", voice_config.get("cfg_scale"))
+        voice_config["cfg_scale"] = float(cfg_val) if cfg_val not in (None, "", "null") else None
+        voice_config["ref_audio"] = data.get("ref_audio", voice_config.get("ref_audio", ""))
+        voice_config["ref_text"] = data.get("ref_text", voice_config.get("ref_text", ""))
+    except (ValueError, TypeError) as e:
+        return JSONResponse(status_code=400, content={"ok": False, "error": f"Invalid config value: {e}"})
 
     msg = f"Engine: {new_engine}, Irritation: {voice_config['chaos']}%"
 
@@ -1300,36 +1329,129 @@ async def voice_preview(request: Request):
 @app.websocket("/ws/boot")
 async def boot_ws(websocket: WebSocket):
     await websocket.accept()
+    try:
+        await _boot_sequence(websocket)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Boot WS error: {e}")
+
+async def _boot_sequence(websocket: WebSocket):
     loop = asyncio.get_running_loop()
 
-    # ---- Gather real system info ----
-    py_ver = sys.version.split()[0]
-    os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
+    # ---- Helper: safe shell command ----
+    def _sh(cmd):
+        try:
+            if isinstance(cmd, list):
+                return subprocess.check_output(cmd, text=True, timeout=5).strip()
+            return subprocess.check_output(cmd, shell=True, text=True, timeout=5).strip()
+        except Exception:
+            return "N/A"
 
+    # ---- Helper: package version ----
     def _pkg_ver(pkg):
         try:
             return importlib.metadata.version(pkg)
         except Exception:
             return "N/A"
 
-    fastapi_ver = _pkg_ver("fastapi")
-    httpx_ver = _pkg_ver("httpx")
-    torch_ver = _pkg_ver("torch")
-    diffusers_ver = _pkg_ver("diffusers")
-    uvicorn_ver = _pkg_ver("uvicorn")
+    # ---- Gather ALL system info ----
+    py_ver = sys.version.split()[0]
+    py_impl = platform.python_implementation()
+    py_compiler = platform.python_compiler()
+    os_name = platform.system()
+    os_release = platform.release()
+    os_version = platform.version()
+    arch = platform.machine()
+    hostname = platform.node()
+
+    # Hardware info (macOS-specific where possible)
+    chip = _sh("sysctl -n machdep.cpu.brand_string")
+    cpu_cores_total = _sh("sysctl -n hw.ncpu")
+    cpu_cores_perf = _sh("sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || echo N/A")
+    cpu_cores_eff = _sh("sysctl -n hw.perflevel1.logicalcpu 2>/dev/null || echo N/A")
+    try:
+        ram_bytes = int(_sh("sysctl -n hw.memsize"))
+        ram_gb = f"{ram_bytes / (1024**3):.0f}GB"
+    except Exception:
+        ram_gb = "N/A"
+    gpu_cores = _sh("system_profiler SPDisplaysDataType 2>/dev/null | grep 'Total Number of Cores' | awk -F': ' '{print $2}'")
+    metal_support = _sh("system_profiler SPDisplaysDataType 2>/dev/null | grep 'Metal Support' | awk -F': ' '{print $2}'")
+    neural_engine = _sh("system_profiler SPHardwareDataType 2>/dev/null | grep 'Neural Engine' | head -1 | awk -F': ' '{print $2}'") or "N/A"
+    model_id = _sh("sysctl -n hw.model 2>/dev/null || echo N/A")
+    mac_model_name = _sh("system_profiler SPHardwareDataType 2>/dev/null | grep 'Model Name' | awk -F': ' '{print $2}'")
+
+    # Disk space
+    try:
+        st = os.statvfs(os.getcwd())
+        disk_free_gb = (st.f_bavail * st.f_frsize) / (1024**3)
+        disk_total_gb = (st.f_blocks * st.f_frsize) / (1024**3)
+        disk_str = f"{disk_free_gb:.1f}GB free / {disk_total_gb:.1f}GB total"
+    except Exception:
+        disk_str = "N/A"
+
+    # Load average & uptime
+    try:
+        load1, load5, load15 = os.getloadavg()
+        load_str = f"{load1:.2f} / {load5:.2f} / {load15:.2f}"
+    except Exception:
+        load_str = "N/A"
+    uptime_str = _sh("uptime | sed 's/.*up //' | sed 's/,.*//'")
+
+    # Network
+    local_ip = _sh("ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo N/A")
+
+    # Git info (use list form to avoid shell-injection on paths with apostrophes)
+    _cwd = os.getcwd()
+    git_branch = _sh(["git", "-C", _cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+    git_hash = _sh(["git", "-C", _cwd, "rev-parse", "--short", "HEAD"])
+    git_hash_full = _sh(["git", "-C", _cwd, "rev-parse", "HEAD"])
+    git_date = _sh(["git", "-C", _cwd, "log", "-1", "--format=%ci"])
+    git_msg = _sh(["git", "-C", _cwd, "log", "-1", "--format=%s"])
+    git_author = _sh(["git", "-C", _cwd, "log", "-1", "--format=%an"])
+    git_count = _sh(["git", "-C", _cwd, "rev-list", "--count", "HEAD"])
+    git_dirty = _sh(["git", "-C", _cwd, "status", "--porcelain"])
+    git_tag = _sh(["git", "-C", _cwd, "describe", "--tags", "--abbrev=0"])
+    git_status = "CLEAN" if (not git_dirty or git_dirty == "N/A") else f"DIRTY ({len(git_dirty.splitlines())} files)"
+
+    # Node / npm versions
+    node_ver = _sh("node --version 2>/dev/null")
+    npm_ver = _sh("npm --version 2>/dev/null")
+
+    # Package versions — exhaustive
+    pkg_versions = {}
+    for pkg in ["fastapi", "uvicorn", "httpx", "aiofiles", "torch", "diffusers",
+                 "transformers", "numpy", "scipy", "soundfile", "huggingface-hub",
+                 "accelerate", "loguru", "misaki", "mlx", "mlx-audio", "starlette",
+                 "pydantic", "anyio", "websockets"]:
+        pkg_versions[pkg] = _pkg_ver(pkg)
+
+    # Python venv info
+    in_venv = sys.prefix != sys.base_prefix
+    venv_path = sys.prefix if in_venv else "N/A"
 
     # Probe Ollama
     ollama_ok = False
     ollama_models = []
+    ollama_models_data = []
     base_model_size = "unknown"
+    ollama_ver = "N/A"
     try:
         async with httpx.AsyncClient() as client:
+            # Version
+            try:
+                vr = await client.get(f"{OLLAMA_URL}/api/version", timeout=3)
+                if vr.status_code == 200:
+                    ollama_ver = vr.json().get("version", "N/A")
+            except Exception:
+                pass
+            # Models
             r = await client.get(f"{OLLAMA_URL}/api/tags", timeout=5)
             if r.status_code == 200:
                 ollama_ok = True
-                models_data = r.json().get("models", [])
-                ollama_models = [m["name"] for m in models_data]
-                for m in models_data:
+                ollama_models_data = r.json().get("models", [])
+                ollama_models = [m["name"] for m in ollama_models_data]
+                for m in ollama_models_data:
                     if _active_model in m.get("name", ""):
                         size_bytes = m.get("size", 0)
                         if size_bytes:
@@ -1337,35 +1459,196 @@ async def boot_ws(websocket: WebSocket):
     except Exception:
         pass
 
+    # Get detailed model info for active model
+    model_detail = {}
+    model_info = {}
+    if ollama_ok:
+        try:
+            async with httpx.AsyncClient() as client:
+                sr = await client.post(f"{OLLAMA_URL}/api/show",
+                    json={"name": _active_model}, timeout=5)
+                if sr.status_code == 200:
+                    show_data = sr.json()
+                    model_detail = show_data.get("details", {})
+                    model_info = show_data.get("model_info", {})
+        except Exception:
+            pass
+
+    # Ollama total disk usage
+    ollama_total_bytes = sum(m.get("size", 0) for m in ollama_models_data)
+    ollama_total_str = f"{ollama_total_bytes / (1024**3):.1f}GB" if ollama_total_bytes else "N/A"
+
     # Memory info
     try:
         ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        mem_mb = ru / (1024 * 1024) if platform.system() == "Darwin" else ru / 1024
+        mem_mb = ru / (1024 * 1024) if os_name == "Darwin" else ru / 1024
         mem_str = f"{mem_mb:.0f}MB"
     except Exception:
         mem_str = "N/A"
 
+    # Read package.json version
+    try:
+        with open(os.path.join(os.getcwd(), "package.json")) as f:
+            pkg_json = json.load(f)
+        app_version = pkg_json.get("version", "0.0.0")
+        app_desc = pkg_json.get("description", "")
+    except Exception:
+        app_version = "0.6.6"
+        app_desc = ""
+
+    uid = _sh("whoami")
+
     # ---- Build boot steps from real data ----
     boot_steps = [
-        (f"[BOOT] ChadGPT v0.6.6.6 — init", 0.15),
-        (f"[SYS ] {os_info}", 0.1),
-        (f"[SYS ] Python {py_ver} | PID {os.getpid()}", 0.1),
-        (f"[SYS ] CWD: {os.getcwd()}", 0.08),
-        (f"[DEP ] fastapi=={fastapi_ver}  uvicorn=={uvicorn_ver}", 0.08),
-        (f"[DEP ] httpx=={httpx_ver}", 0.06),
-        (f"[DEP ] torch=={torch_ver}", 0.06),
-        (f"[DEP ] diffusers=={diffusers_ver}", 0.06),
-        (f"[MEM ] Process RSS: {mem_str}", 0.08),
-        (f"[NET ] Ollama endpoint: {OLLAMA_URL}", 0.12),
-        (f"[NET ] Ollama status: {'CONNECTED' if ollama_ok else 'UNREACHABLE'}", 0.1),
+        # === HEADER ===
+        (f"", 0.04),
+        (f"  ██████╗██╗  ██╗ █████╗ ██████╗  ██████╗ ██████╗ ████████╗", 0.02),
+        (f"  ██╔════╝██║  ██║██╔══██╗██╔══██╗██╔════╝ ██╔══██╗╚══██╔══╝", 0.02),
+        (f"  ██║     ███████║███████║██║  ██║██║  ███╗██████╔╝   ██║   ", 0.02),
+        (f"  ██║     ██╔══██║██╔══██║██║  ██║██║   ██║██╔═══╝    ██║   ", 0.02),
+        (f"  ╚██████╗██║  ██║██║  ██║██████╔╝╚██████╔╝██║        ██║   ", 0.02),
+        (f"   ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝  ╚═════╝╚═╝        ╚═╝   ", 0.02),
+        (f"", 0.04),
+        (f"[BOOT] ChadGPT v{app_version}.6 — {app_desc}", 0.12),
+        (f"[BOOT] Build {git_hash or 'unknown'} | {git_count or '?'} commits | branch: {git_branch or 'detached'}", 0.08),
+        (f"[BOOT] {git_status} | tag: {git_tag if git_tag != 'N/A' else 'untagged'}", 0.06),
+        (f"", 0.03),
+
+        # === SYSTEM / HARDWARE ===
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[SYS ] SYSTEM HARDWARE ENUMERATION", 0.06),
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[HW  ] Machine: {mac_model_name or 'Unknown'} ({model_id})", 0.05),
+        (f"[HW  ] Chip: {chip}", 0.05),
+        (f"[HW  ] Cores: {cpu_cores_total} ({cpu_cores_perf}P + {cpu_cores_eff}E)", 0.05),
+        (f"[HW  ] GPU cores: {gpu_cores or 'N/A'} | Metal: {metal_support or 'N/A'}", 0.05),
+        (f"[HW  ] Neural Engine: {neural_engine}", 0.05),
+        (f"[HW  ] RAM: {ram_gb} unified memory", 0.05),
+        (f"[HW  ] Disk: {disk_str}", 0.05),
+        (f"", 0.03),
+
+        # === OS / KERNEL ===
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[SYS ] OPERATING SYSTEM", 0.06),
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[OS  ] {os_name} {os_release} ({arch})", 0.05),
+        (f"[OS  ] Kernel: {os_version[:80]}", 0.05),
+        (f"[OS  ] Hostname: {hostname}", 0.05),
+        (f"[OS  ] IP: {local_ip}", 0.05),
+        (f"[OS  ] User: {uid}", 0.04),
+        (f"[OS  ] Uptime: {uptime_str}", 0.04),
+        (f"[OS  ] Load avg: {load_str} (1/5/15 min)", 0.04),
+        (f"", 0.03),
+
+        # === RUNTIME ===
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[SYS ] RUNTIME ENVIRONMENT", 0.06),
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[RT  ] Python {py_ver} ({py_impl}) | PID {os.getpid()}", 0.05),
+        (f"[RT  ] Compiler: {py_compiler}", 0.04),
+        (f"[RT  ] Venv: {'ACTIVE' if in_venv else 'NONE'} — {venv_path if in_venv else 'system python'}", 0.04),
+        (f"[RT  ] Node.js: {node_ver} | npm: {npm_ver}", 0.04),
+        (f"[RT  ] CWD: {os.getcwd()}", 0.04),
+        (f"", 0.03),
+
+        # === DEPENDENCIES ===
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[SYS ] DEPENDENCY MANIFEST", 0.06),
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[DEP ] fastapi=={pkg_versions['fastapi']}  uvicorn=={pkg_versions['uvicorn']}", 0.04),
+        (f"[DEP ] starlette=={pkg_versions['starlette']}  pydantic=={pkg_versions['pydantic']}", 0.04),
+        (f"[DEP ] httpx=={pkg_versions['httpx']}  anyio=={pkg_versions['anyio']}", 0.04),
+        (f"[DEP ] aiofiles=={pkg_versions['aiofiles']}  websockets=={pkg_versions['websockets']}", 0.04),
+        (f"[DEP ] torch=={pkg_versions['torch']}", 0.04),
+        (f"[DEP ] transformers=={pkg_versions['transformers']}", 0.04),
+        (f"[DEP ] diffusers=={pkg_versions['diffusers']}  accelerate=={pkg_versions['accelerate']}", 0.04),
+        (f"[DEP ] numpy=={pkg_versions['numpy']}  scipy=={pkg_versions['scipy']}", 0.04),
+        (f"[DEP ] soundfile=={pkg_versions['soundfile']}  misaki=={pkg_versions['misaki']}", 0.04),
+        (f"[DEP ] mlx=={pkg_versions['mlx']}  mlx-audio=={pkg_versions['mlx-audio']}", 0.04),
+        (f"[DEP ] huggingface-hub=={pkg_versions['huggingface-hub']}", 0.04),
+        (f"[DEP ] loguru=={pkg_versions['loguru']}", 0.03),
+        (f"", 0.03),
+
+        # === GIT / BUILD ===
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[SYS ] BUILD & VERSION CONTROL", 0.06),
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[GIT ] Branch: {git_branch}", 0.04),
+        (f"[GIT ] HEAD: {git_hash_full}", 0.04),
+        (f"[GIT ] Commit #{git_count}: \"{git_msg}\"", 0.05),
+        (f"[GIT ] Author: {git_author} | Date: {git_date}", 0.04),
+        (f"[GIT ] Worktree: {git_status}", 0.04),
+        (f"", 0.03),
+
+        # === MEMORY ===
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[SYS ] MEMORY & PROCESS", 0.06),
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[MEM ] Process RSS: {mem_str}", 0.05),
+        (f"[MEM ] System RAM: {ram_gb}", 0.04),
+        (f"[MEM ] Audio dir: {AUDIO_DIR}", 0.04),
+        (f"[MEM ] Image dir: {IMAGE_DIR}", 0.04),
+        (f"", 0.03),
+
+        # === NETWORK / OLLAMA ===
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[SYS ] LLM SUBSYSTEM", 0.06),
+        (f"[SYS ] ═══════════════════════════════════════════", 0.03),
+        (f"[NET ] Ollama endpoint: {OLLAMA_URL}", 0.06),
+        (f"[NET ] Ollama version: {ollama_ver}", 0.05),
+        (f"[NET ] Ollama status: {'CONNECTED' if ollama_ok else 'UNREACHABLE'}", 0.06),
     ]
 
-    if ollama_ok and ollama_models:
-        boot_steps.append((f"[NET ] Models available: {', '.join(ollama_models[:6])}", 0.1))
+    # Individual model listing with details
+    if ollama_ok and ollama_models_data:
+        boot_steps.append((f"[NET ] Models installed: {len(ollama_models_data)} | Total disk: {ollama_total_str}", 0.05))
+        for m in ollama_models_data:
+            name = m["name"]
+            size = m.get("size", 0)
+            size_str = f"{size / (1024**3):.1f}GB" if size else "?"
+            details = m.get("details", {})
+            param_size = details.get("parameter_size", "?")
+            quant = details.get("quantization_level", "?")
+            family = details.get("family", "?")
+            active_marker = " ◄ ACTIVE" if _active_model in name else ""
+            boot_steps.append((f"[MDL ]   {name} [{param_size}] {quant} ({family}) {size_str}{active_marker}", 0.04))
+
     model_available = any(_active_model in m for m in ollama_models) if ollama_ok else False
-    boot_steps.append((f"[SYS ] Active model: {_active_model} ({base_model_size}){'' if model_available else ' [NOT FOUND]'}", 0.08))
-    boot_steps.append((f"[SYS ] Audio dir: {AUDIO_DIR}", 0.06))
-    boot_steps.append((f"[SYS ] Image dir: {IMAGE_DIR}", 0.06))
+
+    # Active model deep info
+    boot_steps.append((f"", 0.03))
+    boot_steps.append((f"[SYS ] ═══════════════════════════════════════════", 0.03))
+    boot_steps.append((f"[SYS ] ACTIVE MODEL PROFILE", 0.06))
+    boot_steps.append((f"[SYS ] ═══════════════════════════════════════════", 0.03))
+    boot_steps.append((f"[LLM ] Model: {_active_model} ({base_model_size}){'' if model_available else ' [NOT FOUND]'}", 0.06))
+
+    if model_detail:
+        boot_steps.append((f"[LLM ] Format: {model_detail.get('format', 'N/A')} | Family: {model_detail.get('family', 'N/A')}", 0.04))
+        boot_steps.append((f"[LLM ] Parameters: {model_detail.get('parameter_size', 'N/A')} | Quantization: {model_detail.get('quantization_level', 'N/A')}", 0.04))
+
+    if model_info:
+        base_model = model_info.get("general.base_model.0.name", "N/A")
+        base_org = model_info.get("general.base_model.0.organization", "N/A")
+        finetune = model_info.get("general.finetune", "N/A")
+        ctx_len = model_info.get("llama.context_length", "N/A")
+        vocab = model_info.get("llama.vocab_size", "N/A")
+        layers = model_info.get("llama.block_count", "N/A")
+        embed_dim = model_info.get("llama.embedding_length", "N/A")
+        ff_dim = model_info.get("llama.feed_forward_length", "N/A")
+        heads = model_info.get("llama.attention.head_count", "N/A")
+        kv_heads = model_info.get("llama.attention.head_count_kv", "N/A")
+        param_count = model_info.get("general.parameter_count", 0)
+        param_str = f"{param_count:,}" if param_count else "N/A"
+        license_info = model_info.get("general.license", "N/A")
+        tokenizer = model_info.get("tokenizer.ggml.model", "N/A")
+
+        boot_steps.append((f"[LLM ] Base: {base_model} by {base_org}", 0.04))
+        boot_steps.append((f"[LLM ] Finetune: {finetune} | License: {license_info}", 0.04))
+        boot_steps.append((f"[LLM ] Parameters: {param_str} exact", 0.04))
+        boot_steps.append((f"[LLM ] Context window: {ctx_len} tokens", 0.04))
+        boot_steps.append((f"[LLM ] Vocabulary: {vocab} tokens | Tokenizer: {tokenizer}", 0.04))
+        boot_steps.append((f"[LLM ] Architecture: {layers} layers | {embed_dim}d embeddings", 0.04))
+        boot_steps.append((f"[LLM ] FFN dim: {ff_dim} | Attn heads: {heads} ({kv_heads} KV)", 0.04))
 
     # +5 for: model verify, qwen3 load, qwen3 result, final status x2
     total_steps = len(boot_steps) + 5
@@ -1383,7 +1666,7 @@ async def boot_ws(websocket: WebSocket):
     step += 1
     if model_available:
         await websocket.send_json({
-            "type": "log", "content": f"[SYS ] Model '{_active_model}' verified",
+            "type": "log", "content": f"[SYS ] Model '{_active_model}' verified ✓",
             "progress": step / total_steps
         })
     elif ollama_ok:
@@ -1434,8 +1717,15 @@ async def boot_ws(websocket: WebSocket):
     # ---- Final status ----
     tts_engine = voice_config["engine"]
     final_lines = [
+        f"",
+        f"[SYS ] ═══════════════════════════════════════════",
+        f"[SYS ] SYSTEM READY",
+        f"[SYS ] ═══════════════════════════════════════════",
         f"[SYS ] TTS engine: {tts_engine}",
+        f"[SYS ] Voice config: {voice_config.get('speaker', 'default')}",
         f"[SYS ] Serving on 0.0.0.0:6969",
+        f"[SYS ] All subsystems nominal",
+        f"",
     ]
 
     for line in final_lines:
@@ -1444,7 +1734,7 @@ async def boot_ws(websocket: WebSocket):
             "type": "log", "content": line,
             "progress": min(1.0, step / total_steps)
         })
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.06)
 
     await websocket.send_json({"type": "ready"})
     await websocket.close()
@@ -1463,9 +1753,12 @@ async def _cleanup_temp_files():
             except Exception:
                 pass
 
+_cleanup_task_ref = None
+
 @app.on_event("startup")
 async def _start_cleanup_task():
-    asyncio.create_task(_cleanup_temp_files())
+    global _cleanup_task_ref
+    _cleanup_task_ref = asyncio.create_task(_cleanup_temp_files())
 
 
 if __name__ == "__main__":

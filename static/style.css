@@ -390,11 +390,11 @@ body {
 /* Boot Terminal */
 #boot-terminal {
     flex: 1;
-    padding: 20px;
+    padding: 16px;
     overflow-y: auto;
     font-family: 'Share Tech Mono', monospace;
-    font-size: 13px;
-    line-height: 1.6;
+    font-size: 11px;
+    line-height: 1.4;
     display: none;
     background: var(--bg);
 }
@@ -408,7 +408,7 @@ body {
     width: 100%;
     margin-bottom: 8px;
     font-family: 'Share Tech Mono', monospace;
-    font-size: 13px;
+    font-size: 11px;
     color: var(--green);
     white-space: pre;
     letter-spacing: 0;
@@ -427,8 +427,8 @@ body {
     animation: fadeInLine 0.15s forwards;
     color: var(--green-dim);
     font-family: 'Share Tech Mono', monospace;
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: 11px;
+    line-height: 1.4;
 }
 
 .boot-line.error {
@@ -437,6 +437,11 @@ body {
 
 .boot-line.success {
     color: var(--green);
+}
+
+.boot-line.header {
+    color: var(--green);
+    text-shadow: 0 0 6px var(--green);
 }
 
 @keyframes fadeInLine {

@@ -298,7 +298,7 @@ function stopAudio() {
     _audioQueue = [];
     _audioPlaying_queue = false;
     const el = document.getElementById('chad-audio');
-    if (el) { el.oncanplaythrough = null; el.onended = null; el.onerror = null; el.pause(); el.currentTime = 0; }
+    if (el) { el.oncanplaythrough = null; el.onended = null; el.onerror = null; el.onplay = null; el.pause(); el.currentTime = 0; }
     if (chadAvatar) chadAvatar.stopTalking();
     // Notify call system that audio stopped so it can resume listening
     if (typeof callState !== 'undefined' && callState === 'connected') {
@@ -350,10 +350,12 @@ function addBootLine(text, type = '') {
     // Terminal-style: just the text, color-coded by content
     line.textContent = text;
 
-    if (text.includes('OK') || text.includes('ONLINE') || text.includes('CONNECTED') || text.includes('ready')) {
+    if (text.includes('OK') || text.includes('ONLINE') || text.includes('CONNECTED') || text.includes('ready') || text.includes('verified') || text.includes('nominal') || text.includes('ACTIVE') || text.includes('CLEAN')) {
         line.classList.add('success');
-    } else if (text.includes('FAIL') || text.includes('ERR') || text.includes('UNREACHABLE')) {
+    } else if (text.includes('FAIL') || text.includes('ERR') || text.includes('UNREACHABLE') || text.includes('NOT FOUND') || text.includes('DIRTY')) {
         line.classList.add('error');
+    } else if (text.includes('═══') || text.includes('██')) {
+        line.classList.add('header');
     }
 
     log.appendChild(line);
@@ -601,7 +603,7 @@ function stopMetricsTicker() {
 function connectChat() {
     chatWs = new WebSocket(`ws://${window.location.host}/ws/chat`);
     chatWs.onmessage = (event) => handleChatMessage(JSON.parse(event.data));
-    chatWs.onclose = () => { if (booted) setTimeout(connectChat, 2000); };
+    chatWs.onclose = () => { if (booted && powered) setTimeout(connectChat, 2000); };
 }
 
 function handleChatMessage(data) {

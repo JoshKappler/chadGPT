@@ -394,6 +394,7 @@ class Qwen3TTSBackend:
             import numpy as np
             import soundfile as sf
             all_audio = []
+            sr = 24000  # default sample rate in case all chunks fail before assigning
             t0 = time.time()
 
             # Hold tts_lock for the entire synthesis to prevent concurrent GPU access
@@ -611,9 +612,9 @@ class SayFallback:
         return True
 
     def synthesize(self, text: str, output_path: str, voice_config: dict, angry: bool = False) -> bool:
+        aiff_path = output_path.replace(".wav", ".aiff")
         try:
             rate = "160" if angry else "175"
-            aiff_path = output_path.replace(".wav", ".aiff")
             subprocess.run(
                 ["say", "-v", "Daniel", "-r", rate, "-o", aiff_path, text],
                 check=True, timeout=30,
@@ -622,8 +623,9 @@ class SayFallback:
                 ["afconvert", "-f", "WAVE", "-d", "LEI16", aiff_path, output_path],
                 check=True, timeout=10,
             )
-            Path(aiff_path).unlink(missing_ok=True)
             return True
         except Exception as e:
             logger.error(f"say fallback failed: {e}")
             return False
+        finally:
+            Path(aiff_path).unlink(missing_ok=True)

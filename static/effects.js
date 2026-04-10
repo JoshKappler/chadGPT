@@ -18,8 +18,8 @@ class StaticEffect {
     stop() { this.running = false; }
 
     setIntensity(val) {
-        this.intensity = val;
-        this.canvas.style.opacity = val;
+        this.intensity = Math.min(val, 1.0);
+        this.canvas.style.opacity = this.intensity;
     }
 
     spike(amount = 0.15, duration = 120) {
@@ -467,6 +467,9 @@ class FlickerEffect {
         const screen = document.getElementById('crt-screen');
         const app = document.getElementById('app');
         if (!screen || !app) return;
+        // Prevent overlapping rolls from leaving app invisible
+        if (this._rolling) return;
+        this._rolling = true;
 
         const screenH = screen.clientHeight;
 
@@ -566,6 +569,7 @@ class FlickerEffect {
                 app.style.visibility = '';
                 wrapper.remove();
                 distortion.remove();
+                this._rolling = false;
             }
         };
 
@@ -846,6 +850,7 @@ class ImageGenAnimation {
                 this.ctx.drawImage(img, 0, 0, 256, 256);
                 this.pixelData = this.ctx.getImageData(0, 0, 256, 256);
                 this.revealMask = new Uint8Array(256 * 256); // 0 = hidden, 1 = revealed
+                this._revealedCount = 0;
                 this.frame = 0;
                 this._animateReveal(resolve);
             };
@@ -954,7 +959,10 @@ class ImageGenAnimation {
         // Reveal random chunks of pixels
         for (let i = 0; i < revealPerFrame; i++) {
             const idx = Math.floor(Math.random() * totalPixels);
-            this.revealMask[idx] = 1;
+            if (!this.revealMask[idx]) {
+                this.revealMask[idx] = 1;
+                this._revealedCount++;
+            }
         }
 
         // Build the frame
@@ -983,13 +991,8 @@ class ImageGenAnimation {
         this.ctx.putImageData(display, 0, 0);
         this.frame++;
 
-        // Check if mostly revealed
-        let revealed = 0;
-        for (let i = 0; i < totalPixels; i++) {
-            if (this.revealMask[i]) revealed++;
-        }
-
-        if (revealed >= totalPixels * 0.95) {
+        // Check if mostly revealed (use running count instead of O(n) scan)
+        if (this._revealedCount >= totalPixels * 0.95) {
             // Final snap: draw the full image
             this.ctx.putImageData(this.pixelData, 0, 0);
             this.running = false;

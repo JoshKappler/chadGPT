@@ -8,6 +8,7 @@ var _callAnalyserMic = null;
 var _callAnalyserChad = null;
 var _callAudioCtx = null;
 var _callChadSource = null;
+var _callMicSource = null;
 var _callAnimFrame = null;
 var _callAutoMicTimer = null;
 var _callRecognition = null;
@@ -561,10 +562,10 @@ function setupCallAnalysers() {
     if (!_callMicStream) {
         navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
             _callMicStream = stream;
-            var source = ctx.createMediaStreamSource(stream);
+            _callMicSource = ctx.createMediaStreamSource(stream);
             _callAnalyserMic = ctx.createAnalyser();
             _callAnalyserMic.fftSize = 256;
-            source.connect(_callAnalyserMic);
+            _callMicSource.connect(_callAnalyserMic);
         }).catch(function(e) {
             console.warn('[CALL] Mic access denied:', e);
         });
@@ -800,6 +801,7 @@ function callStartListening() {
                 if (transcript.trim() && callState === 'connected') {
                     // If Chad is mid-response, wait for streaming to finish before sending
                     function _trySendCallMessage() {
+                        if (callState !== 'connected') return;
                         if (typeof isStreaming !== 'undefined' && isStreaming) {
                             setTimeout(_trySendCallMessage, 500);
                             return;
@@ -915,12 +917,17 @@ function endCall() {
 
     phoneRingStop();
     callStopListening();
+    _callRecognition = null;
     if (_callAutoMicTimer) { clearTimeout(_callAutoMicTimer); _callAutoMicTimer = null; }
     if (_callTimer) { clearTimeout(_callTimer); _callTimer = null; }
     if (_callRingTimer) { clearTimeout(_callRingTimer); _callRingTimer = null; }
 
     stopAudio();
 
+    if (_callMicSource) {
+        try { _callMicSource.disconnect(); } catch(e) {}
+        _callMicSource = null;
+    }
     if (_callMicStream) {
         _callMicStream.getTracks().forEach(function(t) { t.stop(); });
         _callMicStream = null;
