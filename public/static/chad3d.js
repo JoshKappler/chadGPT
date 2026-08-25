@@ -34,6 +34,7 @@ var chadAvatar = null;
     var mood          = 'dormant';
     var wakeRequested = false;
     var _smoothAmp    = 0;
+    var _warpCanvas   = null;
     var irritationLevel = 0;
     var _brightness   = 0.15;
     var _targetBright = 0.15;
@@ -310,38 +311,53 @@ var chadAvatar = null;
             var jawHW  = MOUTH_IMG.jawHalfW * iw * sxf;
             var jawH   = chinPx - lipPx;
             var regionHW = jawHW * 1.35;       // falloff reaches zero here
-            var topY   = lipPx;
-            var midY   = lipPx + jawH * 0.45;  // bulge peak
-            var botY   = chinPx + jawH * 0.35; // warp fades out by here
+            // Integer pixel bounds: fractional coords leave a faint
+            // antialiasing seam around the repainted region
+            var topY   = Math.round(lipPx);
+            var midY   = Math.round(lipPx + jawH * 0.45);  // bulge peak
+            var botY   = Math.round(chinPx + jawH * 0.35); // warp fades out by here
             var drop   = amp * jawH * 0.16;    // max downward bend
 
-            ctx.save();
-            ctx.translate(cx + ox, cy + oy);
-            ctx.scale(breathS, breathS);
-            ctx.translate(-cx, -cy);
+            var rx = Math.round(mcx - regionHW), rw = Math.round(regionHW * 2);
+            var rh = botY - topY;
 
-            // Repaint the region from scratch so the layer alphas don't stack
-            var rx = mcx - regionHW, rw = regionHW * 2;
-            ctx.fillStyle = '#050505';
-            ctx.fillRect(rx, topY, rw, botY - topY);
+            // Compose the warp offscreen and blit it in ONE draw: repainting
+            // in place blends differently at the boundary's partial-coverage
+            // pixels and leaves a faint seam rectangle
+            if (!_warpCanvas || _warpCanvas.width !== rw || _warpCanvas.height !== rh) {
+                _warpCanvas = document.createElement('canvas');
+                _warpCanvas.width = rw;
+                _warpCanvas.height = rh;
+            }
+            var wc = _warpCanvas.getContext('2d');
+            wc.globalAlpha = 1;
+            wc.fillStyle = '#050505';
+            wc.fillRect(0, 0, rw, rh);
 
             var STRIPS = 26;
             var sw = rw / STRIPS;
+            var midLocal = midY - topY;
             for (var si = 0; si < STRIPS; si++) {
                 var sx0 = rx + si * sw;
+                var lx0 = si * sw;
                 var tf  = Math.min(1, Math.abs(((sx0 + sw / 2) - mcx) / regionHW));
                 var env = Math.cos(tf * Math.PI / 2);
                 var dy  = drop * env * env;
                 for (var layer = 0; layer < 2; layer++) {
                     var img = layer === 0 ? greenImg : edgeImg;
-                    ctx.globalAlpha = _brightness * (layer === 0 ? 0.45 : 0.9);
-                    ctx.drawImage(img, sx0, topY, sw, midY - topY,
-                                       sx0, topY, sw, midY - topY + dy);
-                    ctx.drawImage(img, sx0, midY, sw, botY - midY,
-                                       sx0, midY + dy, sw, botY - midY - dy);
+                    wc.globalAlpha = _brightness * (layer === 0 ? 0.45 : 0.9);
+                    wc.drawImage(img, sx0, topY, sw, midY - topY,
+                                      lx0, 0, sw, midLocal + dy);
+                    wc.drawImage(img, sx0, midY, sw, botY - midY,
+                                      lx0, midLocal + dy, sw, rh - midLocal - dy);
                 }
             }
-            ctx.globalAlpha = 1;
+
+            ctx.save();
+            ctx.translate(cx + ox, cy + oy);
+            ctx.scale(breathS, breathS);
+            ctx.translate(-cx, -cy);
+            ctx.drawImage(_warpCanvas, rx, topY);
             ctx.restore();
         }
 
