@@ -1,43 +1,26 @@
-// ChadGPT voice endpoint. Primary backend: ElevenLabs (gravelly, chaotic
-// settings) when ELEVENLABS_API_KEY is set; falls back to OpenAI speech.
+// ChadGPT voice endpoint: ElevenLabs only, no fallbacks, failures are loud.
 //
-// POST { text, voice?, speed? } -> audio/mpeg bytes
-// GET -> { ok, backend, voices }  (settings panel + boot screen)
+// POST { text, voice? } -> audio/mpeg bytes, or 4xx/5xx JSON with the reason
+// GET -> { ok, backend, model, voices } | { ok: false, error }
+//
+// Model eleven_v3 at stability 0 (Creative) mirrors the playground setup
+// Josh approved for Matthew Schmitz - Gravel, Deep Anti-Hero.
 
-// Multilingual v2: highest similarity for professional voice clones.
-// No voice_settings override: the API then uses the voice's own stored
-// settings, which is what the website preview plays.
-const EL_MODEL = process.env.CHAD_TTS_MODEL || "eleven_multilingual_v2";
-// Josh's pick from the ElevenLabs voice library
-const EL_VOICE = process.env.CHAD_TTS_VOICE || "bwCXcoVxWNYMlC6Esa8u";
-
-const OPENAI_MODEL = "gpt-4o-mini-tts";
-const OPENAI_VOICES = ["ash", "cedar", "onyx", "echo", "verse", "marin", "ballad", "alloy", "sage"];
-const OPENAI_INSTRUCTIONS =
-  "Very deep, gravelly male voice, low-pitched and resonant, with a rough texture. " +
-  "Smug, dry, condescending delivery: unhurried, faintly amused, like a genius " +
-  "explaining something obvious to someone slow. A smirk should be audible. " +
-  "Never cheerful, never customer-service polite.";
+const EL_MODEL = process.env.CHAD_TTS_MODEL || "eleven_v3";
+const EL_VOICE_ID = process.env.CHAD_TTS_VOICE || "bwCXcoVxWNYMlC6Esa8u";
+const EL_SETTINGS = { stability: 0.0 };
 
 let _elVoices = null; // [{name, id}], cached per instance
 
-async function elVoiceList() {
+async function elVoiceList(key) {
   if (_elVoices) return _elVoices;
   const r = await fetch("https://api.elevenlabs.io/v1/voices", {
-    headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY },
+    headers: { "xi-api-key": key },
   });
-  if (!r.ok) return [];
-  const j = await r.json().catch(() => null);
-  _elVoices = (j && j.voices ? j.voices : []).map((v) => ({ name: v.name, id: v.voice_id }));
+  if (!r.ok) throw new Error("voices list " + r.status);
+  const j = await r.json();
+  _elVoices = (j.voices || []).map((v) => ({ name: v.name, id: v.voice_id }));
   return _elVoices;
-}
-
-async function elResolveVoice(name) {
-  const list = await elVoiceList();
-  const hit = list.find((v) => v.name.toLowerCase() === String(name).toLowerCase());
-  if (hit) return hit.id;
-  const dflt = list.find((v) => v.name.toLowerCase() === EL_VOICE.toLowerCase());
-  return dflt ? dflt.id : (list[0] && list[0].id);
 }
 
 const _hits = new Map();
@@ -51,13 +34,67 @@ function rateLimited(ip) {
   return arr.length > 40;
 }
 
-async function pipeAudio(upstream, res) {
-  if (!upstream.ok) {
-    const detail = await upstream.text().catch(() => "");
-    console.error("tts upstream error", upstream.status, detail.slice(0, 500));
-    res.status(502).json({ error: "Chad's voice box is offline." });
-    return;
+async function upstreamError(upstream) {
+  const t = await upstream.text().catch(() => "");
+  let detail = t.slice(0, 200);
+  try { detail = JSON.stringify(JSON.parse(t).detail).slice(0, 200); } catch {}
+  console.error("elevenlabs error", upstream.status, detail);
+  return "elevenlabs " + upstream.status + ": " + detail;
+}
+
+export default async function handler(req, res) {
+  const key = process.env.ELEVENLABS_API_KEY;
+
+  if (req.method === "GET") {
+    if (!key) return res.status(200).json({ ok: false, backend: "elevenlabs", error: "ELEVENLABS_API_KEY missing", voices: [] });
+    try {
+      const voices = await elVoiceList(key);
+      return res.status(200).json({ ok: true, backend: "elevenlabs", model: EL_MODEL, voices: voices.map((v) => ({ name: v.name, lang: "neural" })) });
+    } catch (e) {
+      return res.status(200).json({ ok: false, backend: "elevenlabs", error: e.message, voices: [] });
+    }
   }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "POST only" });
+  }
+  const ip = (req.headers["x-forwarded-for"] || "?").split(",")[0].trim();
+  if (rateLimited(ip)) {
+    return res.status(429).json({ error: "Chad's voice needs a breather. Slow down." });
+  }
+  if (!key) {
+    return res.status(503).json({ error: "ELEVENLABS_API_KEY not configured" });
+  }
+
+  const body = req.body || {};
+  const text = String(body.text == null ? "" : body.text).slice(0, 600).trim();
+  if (!text) return res.status(400).json({ error: "No text" });
+
+  // Default voice is a known id; a named pick from the dropdown is resolved
+  // against the account list and unknown names are a hard 400.
+  let voiceId = EL_VOICE_ID;
+  if (body.voice) {
+    const list = await elVoiceList(key).catch(() => []);
+    const hit = list.find((v) => v.name.toLowerCase() === String(body.voice).toLowerCase() || v.id === body.voice);
+    if (!hit) return res.status(400).json({ error: "Unknown voice: " + String(body.voice).slice(0, 60) });
+    voiceId = hit.id;
+  }
+
+  const upstream = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=mp3_44100_128`,
+    {
+      method: "POST",
+      headers: { "xi-api-key": key, "content-type": "application/json" },
+      body: JSON.stringify({
+        text,
+        model_id: EL_MODEL,
+        voice_settings: EL_SETTINGS,
+      }),
+    }
+  );
+  if (!upstream.ok) {
+    return res.status(502).json({ error: await upstreamError(upstream) });
+  }
+
   res.writeHead(200, { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" });
   try {
     for await (const chunk of upstream.body) {
@@ -67,75 +104,4 @@ async function pipeAudio(upstream, res) {
     console.error("tts stream aborted", e.message);
   }
   res.end();
-}
-
-export default async function handler(req, res) {
-  const elKey = process.env.ELEVENLABS_API_KEY;
-  const oaKey = process.env.OPENAI_API_KEY;
-
-  if (req.method === "GET") {
-    if (elKey) {
-      const voices = await elVoiceList().catch(() => []);
-      return res.status(200).json({ ok: true, backend: "elevenlabs", voices: voices.map((v) => ({ name: v.name, lang: "neural" })) });
-    }
-    if (oaKey) {
-      return res.status(200).json({ ok: true, backend: "openai", voices: OPENAI_VOICES.map((n) => ({ name: n, lang: "neural" })) });
-    }
-    return res.status(200).json({ ok: false, backend: null, voices: [] });
-  }
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "POST only" });
-  }
-  const ip = (req.headers["x-forwarded-for"] || "?").split(",")[0].trim();
-  if (rateLimited(ip)) {
-    return res.status(429).json({ error: "Chad's voice needs a breather. Slow down." });
-  }
-  if (!elKey && !oaKey) {
-    return res.status(503).json({ error: "No TTS key configured" });
-  }
-
-  const body = req.body || {};
-  const text = String(body.text == null ? "" : body.text).slice(0, 600).trim();
-  if (!text) return res.status(400).json({ error: "No text" });
-  let speed = Number(body.speed) || 1.0;
-  speed = Math.min(1.5, Math.max(0.5, speed));
-
-  if (elKey) {
-    const voiceId = await elResolveVoice(body.voice || EL_VOICE).catch(() => null);
-    if (voiceId) {
-      const upstream = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=mp3_44100_128`,
-        {
-          method: "POST",
-          headers: { "xi-api-key": elKey, "content-type": "application/json" },
-          body: JSON.stringify({
-            text,
-            model_id: EL_MODEL,
-          }),
-        }
-      );
-      if (upstream.ok) return pipeAudio(upstream, res);
-      const detail = await upstream.text().catch(() => "");
-      console.error("elevenlabs error, falling back", upstream.status, detail.slice(0, 300));
-    }
-  }
-
-  if (!oaKey) return res.status(502).json({ error: "Chad's voice box is offline." });
-  const voice = OPENAI_VOICES.includes(body.voice) ? body.voice : "ash";
-  const upstream = await fetch("https://api.openai.com/v1/audio/speech", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${oaKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      voice,
-      input: text,
-      instructions: OPENAI_INSTRUCTIONS,
-      response_format: "mp3",
-      speed,
-    }),
-  });
-  return pipeAudio(upstream, res);
 }

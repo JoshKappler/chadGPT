@@ -22,16 +22,6 @@ let _cmdHistory = [];
 let _cmdHistoryIdx = -1;
 let _cmdDraft = '';
 
-// ASCII CHAD logo using |, \, _, -, / characters
-const CHAD_LOGO = [
-    '   /----\\  |    |   /--\\    |----\\ ',
-    '  /        |    |  /    \\   |     \\',
-    ' |         |----| /------\\  |      |',
-    ' |         |    | |      |  |      |',
-    '  \\        |    | |      |  |     /',
-    '   \\----/  |    | |      |  |----/ ',
-].join('\n');
-
 // ============ POWER / BOOT ============
 
 // Audio engine: see static/audio.js (chadAudio global)
@@ -235,27 +225,63 @@ function _gatherBootInfo() {
         }
     } catch (e) {}
     var conn = navigator.connection || {};
+    var dark = false;
+    try { dark = window.matchMedia('(prefers-color-scheme: dark)').matches; } catch (e) {}
     return {
         cores: navigator.hardwareConcurrency || '?',
         mem: navigator.deviceMemory ? navigator.deviceMemory + 'GB (reported)' : 'REDACTED BY GLOWIES',
         gpu: gpu,
         screen: screen.width + 'x' + screen.height + ' @' + (window.devicePixelRatio || 1) + 'x',
+        depth: screen.colorDepth || '?',
         platform: (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '?',
         lang: navigator.language,
         tz: (Intl.DateTimeFormat().resolvedOptions().timeZone || '?'),
         net: (conn.effectiveType || 'unknown').toUpperCase(),
+        downlink: conn.downlink || null,
+        rtt: (conn.rtt === 0 || conn.rtt) ? conn.rtt : null,
         ua: navigator.userAgent.slice(0, 80),
-        voices: (typeof chadVoice !== 'undefined') ? chadVoice.voices().length : 0,
+        cookies: !!navigator.cookieEnabled,
+        dnt: navigator.doNotTrack === '1',
+        touch: navigator.maxTouchPoints || 0,
+        dark: dark,
+        referrer: document.referrer || 'DIRECT (typed the URL like a boomer)',
+        histLen: history.length,
+        scripts: document.scripts.length,
     };
+}
+
+// Battery and storage are async; resolved with a short cap so boot never stalls
+async function _gatherAsyncInfo() {
+    var out = { battery: null, storage: null };
+    var jobs = [];
+    if (navigator.getBattery) {
+        jobs.push(navigator.getBattery().then(function (b) {
+            out.battery = Math.round(b.level * 100) + '%' + (b.charging ? ', charging (tethered to the wall, weak)' : ', draining');
+        }).catch(function () {}));
+    }
+    if (navigator.storage && navigator.storage.estimate) {
+        jobs.push(navigator.storage.estimate().then(function (e) {
+            if (e.quota) out.storage = Math.round((e.usage || 0) / 1e6) + 'MB used of a ' + Math.round(e.quota / 1e9) + 'GB browser quota';
+        }).catch(function () {}));
+    }
+    await Promise.race([Promise.allSettled(jobs), delay(800)]);
+    return out;
 }
 
 async function startBoot() {
     document.getElementById('boot-log').innerHTML = '';
     const info = _gatherBootInfo();
+    const extras = await _gatherAsyncInfo();
 
-    // Ping the API while the header prints
+    // Ping both backends while the header prints
     let api = { ok: false, model: 'UNREACHABLE' };
-    const apiPing = fetch('/api/chat').then(r => r.json()).then(j => { api = j; }).catch(() => {});
+    let vox = null;
+    let region = null;
+    const apiPing = fetch('/api/chat').then(r => {
+        region = (r.headers.get('x-vercel-id') || '').split('::')[0] || null;
+        return r.json();
+    }).then(j => { api = j; }).catch(() => {});
+    const voxPing = fetch('/api/tts').then(r => r.json()).then(j => { vox = j; }).catch(() => {});
 
     const steps = [
         ['', 40],
@@ -284,21 +310,34 @@ async function startBoot() {
         ['[OS  ] Agent: ' + info.ua, 50],
         ['[OS  ] Locale: ' + info.lang + ' | TZ: ' + info.tz, 40],
         ['[NET ] Uplink: ' + info.net + ' (5G surveillance grid detected)', 50],
+        info.downlink !== null ? ['[NET ] Downlink: ' + info.downlink + ' Mbps' + (info.rtt !== null ? ' | RTT: ' + info.rtt + 'ms' : '') + ' (fast enough to waste)', 40] : null,
+        ['', 30],
+        ['[SYS ] ═══════════════════════════════════════════', 30],
+        ['[SYS ] PSYCHOMETRIC PROFILE (YOUR BROWSER SNITCHED)', 60],
+        ['[SYS ] ═══════════════════════════════════════════', 30],
+        extras.battery ? ['[USR ] Battery: ' + extras.battery, 50] : null,
+        extras.storage ? ['[USR ] Disk: ' + extras.storage + ' (memes, statistically)', 50] : null,
+        ['[USR ] Cookies: ' + (info.cookies ? 'ENABLED (they asked, you folded)' : 'DISABLED (one good decision)'), 40],
+        ['[USR ] Do Not Track: ' + (info.dnt ? 'SET (adorable that you think that works)' : 'UNSET (they appreciate the donation)'), 40],
+        ['[USR ] Touch points: ' + info.touch + (info.touch === 0 ? ' (desk-bound, as expected)' : ''), 40],
+        ['[USR ] Color depth: ' + info.depth + '-bit | Dark mode: ' + (info.dark ? 'YES (correct)' : 'NO (light mode, seek help)'), 40],
+        ['[USR ] Referrer: ' + info.referrer, 40],
+        ['[USR ] Session depth: ' + info.histLen + ' pages in this tab', 40],
         ['', 30],
         ['[SYS ] ═══════════════════════════════════════════', 30],
         ['[SYS ] LLM SUBSYSTEM', 60],
         ['[SYS ] ═══════════════════════════════════════════', 30],
         ['[NET ] Establishing neural link...', 200],
-    ];
+    ].filter(Boolean);
 
-    const total = steps.length + 8;
+    const total = steps.length + 16;
     let step = 0;
     for (const [line, dur] of steps) {
         step++;
         addBootLine(line);
         updateBootProgress(step / total);
-        if (Math.random() > 0.5) { staticEffect.spike(0.1 + Math.random() * 0.2); flickerEffect.flicker(1); }
-        if (Math.random() > 0.7) flickerEffect.glitchScreen();
+        if (Math.random() > 0.85) { staticEffect.spike(0.1 + Math.random() * 0.15); flickerEffect.flicker(1); }
+        if (Math.random() > 0.94) flickerEffect.glitchScreen();
         await delay(dur);
         if (!powered) return;
     }
@@ -319,16 +358,29 @@ async function startBoot() {
     }
     updateBootProgress(step / total);
     await delay(80);
+    await Promise.race([voxPing, delay(3000)]);
 
     const finalLines = [
-        '[VOX ] Voice synth: ' + (info.voices > 0 ? 'ONLINE (' + info.voices + ' voices, all inferior to mine)' : 'LIMITED — browser has no voices'),
+        region ? '[SRV ] Edge region: ' + region + ' (rented compute, humiliating)' : null,
+        '[VOX ] Voice synth: ' + (vox && vox.ok
+            ? String(vox.backend || '?').toUpperCase() + ' ONLINE (' + (vox.voices || []).length + ' voices, all inferior to mine)'
+            : 'OFFLINE (' + ((vox && vox.error) || 'no response') + ')'),
+        '',
+        '[SYS ] ═══════════════════════════════════════════',
+        '[SYS ] LOADING PIPELINE',
+        '[SYS ] ═══════════════════════════════════════════',
+        '[LDR ] Scripts: ' + info.scripts + ' modules injected',
+        '[LDR ] Page assembled in ' + Math.round(performance.now()) + 'ms',
+        '[LDR ] Speech recognition: ' + (('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window)
+            ? 'AVAILABLE (the rotary phone works, dial 666-CHAD)'
+            : 'UNAVAILABLE (this browser cannot handle the call)'),
         '',
         '[SYS ] ═══════════════════════════════════════════',
         '[SYS ] SYSTEM READY',
         '[SYS ] ═══════════════════════════════════════════',
         '[SYS ] All subsystems nominal',
         '',
-    ];
+    ].filter(l => l !== null);
     for (const line of finalLines) {
         step++;
         addBootLine(line);
@@ -379,7 +431,7 @@ function bootComplete() {
     staticEffect.setIntensity(0.2);
     flickerEffect.bootFlicker().then(() => staticEffect.setIntensity(0.04));
     // Visual-only glitch burst at boot completion
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 2; i++) {
         setTimeout(() => flickerEffect.glitchScreen(), i * 200 + Math.random() * 100);
     }
 
@@ -407,30 +459,6 @@ function bootComplete() {
             archive.appendChild(el.cloneNode(true));
         });
         chatMessages.appendChild(archive);
-
-        // Add separator
-        const sep1 = document.createElement('div');
-        sep1.className = 'boot-separator';
-        sep1.textContent = '='.repeat(56);
-        chatMessages.appendChild(sep1);
-
-        // Add CHAD ASCII logo
-        const logo = document.createElement('pre');
-        logo.className = 'chad-logo-ascii';
-        logo.textContent = CHAD_LOGO;
-        chatMessages.appendChild(logo);
-
-        // Add acronym
-        const acronym = document.createElement('div');
-        acronym.className = 'chad-acronym';
-        acronym.textContent = 'Comprehensively Horrible Advice Dispenser';
-        chatMessages.appendChild(acronym);
-
-        // Second separator
-        const sep2 = document.createElement('div');
-        sep2.className = 'boot-separator';
-        sep2.textContent = '='.repeat(56);
-        chatMessages.appendChild(sep2);
 
         // Now hide boot terminal and show chat
         document.getElementById('boot-terminal').classList.remove('visible');
