@@ -5,7 +5,8 @@
 // GET -> { ok, backend, voices }  (settings panel + boot screen)
 
 const EL_MODEL = process.env.CHAD_TTS_MODEL || "eleven_turbo_v2_5";
-const EL_VOICE = process.env.CHAD_TTS_VOICE || "Clyde";
+// Josh's pick from the ElevenLabs voice library (must be added to My Voices)
+const EL_VOICE = process.env.CHAD_TTS_VOICE || "bwCXcoVxWNYMlC6Esa8u";
 const EL_SETTINGS = {
   stability: 0.3,        // low = unhinged delivery
   similarity_boost: 0.8,
