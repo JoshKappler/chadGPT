@@ -108,7 +108,7 @@ var chadVoice = (function () {
             _viseme = lipsync.viseme || '';
             var f = lipsync.features;
             if (f) {
-                _amp = Math.max(_amp * 0.8, Math.min(1, (f.volume || 0) * 3));
+                _amp = Math.max(_amp * 0.8, Math.min(1, (f.volume || 0) * 2.2));
                 _bands = f.bands || [];
             }
         } catch (e) {}

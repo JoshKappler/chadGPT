@@ -4,3 +4,5 @@ node_modules/
 .vercel/
 __pycache__/
 venv/
+.vercel
+.env*

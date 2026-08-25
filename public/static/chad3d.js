@@ -47,11 +47,11 @@ var chadAvatar = null;
     // his actual lips at any canvas size.
     var MOUTH_IMG = {
         cx:       0.582,   // mouth center x
-        lipY:     0.556,   // lip separation line y
+        lipY:     0.550,   // lip separation line y
         halfW:    0.032,   // half-width of the lips
-        lowerLipY: 0.581,  // bottom of lower lip
-        chinY:    0.646,   // bottom of chin
-        jawHalfW: 0.064    // half-width of jaw at lip level
+        lowerLipY: 0.577,  // bottom of lower lip
+        chinY:    0.670,   // bottom of chin
+        jawHalfW: 0.060    // half-width of jaw at lip level
     };
 
     // Viseme targets driven by wawa-lipsync: open (jaw), width (spread), round (pursing)
@@ -352,12 +352,12 @@ var chadAvatar = null;
             ctx.scale(breathS, breathS);
             ctx.translate(-cx, -cy);
 
-            // Organic jaw/chin clip path (rounded trapezoid)
-            function jawPath(yOffset) {
+            // Organic jaw/chin clip path (rounded trapezoid), bottom extendable
+            function jawPath(extend) {
                 ctx.beginPath();
-                var top  = lipPx + yOffset;
-                var bot  = chinPx + yOffset;
-                var mid  = top + jawH * 0.55;
+                var top  = lipPx;
+                var bot  = chinPx + extend;
+                var mid  = top + (bot - top) * 0.55;
                 ctx.moveTo(mcx - jawHW, top);
                 ctx.lineTo(mcx + jawHW, top);
                 ctx.bezierCurveTo(
@@ -374,35 +374,32 @@ var chadAvatar = null;
                 ctx.closePath();
             }
 
-            // 1. Erase the original jaw region (paint black over it)
-            ctx.save();
-            jawPath(0);
-            ctx.clip();
-            ctx.fillStyle = '#050505';
-            ctx.fillRect(0, 0, cw, ch);
-            ctx.restore();
-
-            // 2. Redraw jaw region shifted down by the jaw drop
+            // 1. Erase the jaw region plus the drop allowance
             ctx.save();
             jawPath(openAmt);
             ctx.clip();
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, cw, ch);
+
+            // 2. Redraw the jaw stretched downward, anchored at the lip line,
+            //    so the chin drops without exposing a gap band
             ctx.globalAlpha = _brightness * 0.45;
             ctx.drawImage(greenImg,
                 mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
-                mcx - jawHW - 2, lipPx + openAmt, jawHW * 2 + 4, jawH + 4);
+                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4 + openAmt);
             ctx.globalAlpha = _brightness * 0.9;
             ctx.drawImage(edgeImg,
                 mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
-                mcx - jawHW - 2, lipPx + openAmt, jawHW * 2 + 4, jawH + 4);
+                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4 + openAmt);
             ctx.restore();
 
-            // 3. Viseme-shaped mouth opening over the exposed gap: width from
-            //    lip spread, height from openness, roundness pulls it circular
-            var mw = lipHW * 2 * (0.75 + _mouth.width * 0.55) * (1 - _mouth.round * 0.35);
+            // 3. Viseme-shaped mouth opening: width from lip spread, height
+            //    from openness, roundness pulls it circular
+            var mw = lipHW * 2 * (0.68 + _mouth.width * 0.5) * (1 - _mouth.round * 0.35);
             var mh = Math.max(1.5, _mouth.open * (lowLipPx - lipPx) * 2.2 + openAmt * 0.7);
             if (_mouth.open > 0.02) {
                 ctx.beginPath();
-                ctx.ellipse(mcx, lipPx + mh * 0.45, mw / 2, mh / 2, 0, 0, Math.PI * 2);
+                ctx.ellipse(mcx, lipPx + mh * 0.42, mw / 2, mh / 2, 0, 0, Math.PI * 2);
                 ctx.fillStyle = 'rgba(3,4,3,' + Math.min(0.95, 0.5 + _mouth.open).toFixed(2) + ')';
                 ctx.fill();
                 ctx.strokeStyle = 'rgba(0,255,65,' + (0.35 * _brightness).toFixed(2) + ')';
