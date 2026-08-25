@@ -2,8 +2,12 @@
 
 let powered = false;
 let booted = false;
-let chatWs = null;
 let isStreaming = false;
+
+// Conversation history (client-owned — the API is stateless)
+let _conversation = [];
+// Abort handle for the in-flight chat request
+let _chatAbort = null;
 
 // Streaming stats
 let _streamTokenCount = 0;
@@ -184,162 +188,156 @@ function unlockAudio() {
     el.play().catch(() => {});
 }
 
-// Mouth sync — simulated amplitude from audio playback
-// Shared AudioContext + MediaElementSource for real audio analysis.
-// call.js and chad3d.js both tap into these globals.
+// Shared AudioContext — call.js taps this for the mic analyser
 var sharedAudioCtx = null;
-var sharedChadSource = null;   // MediaElementSourceNode (one per element, ever)
-var _ampConnectedEl = null;
 
 function _ensureSharedAudio() {
-    var el = document.getElementById('chad-audio');
-    if (!el) return null;
     if (!sharedAudioCtx) {
         sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
     }
-    if (_ampConnectedEl !== el) {
-        try {
-            sharedChadSource = sharedAudioCtx.createMediaElementSource(el);
-            sharedChadSource.connect(sharedAudioCtx.destination);
-            _ampConnectedEl = el;
-        } catch (e) {
-            _ampConnectedEl = el;
-        }
-    }
     if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume();
-    return el;
+    return sharedAudioCtx;
 }
 
-// Lip-sync analyser (plugged into the shared source)
-var _ampAnalyser = null;
-var _ampDataArray = null;
-
+// Mouth amplitude for the avatar — driven by chadVoice (speechSynthesis)
 function getVoiceAmplitude() {
-    var el = _ensureSharedAudio();
-    if (!el || el.paused || el.ended) return 0;
-
-    // Lazy-create analyser and attach to shared source
-    if (!_ampAnalyser && sharedAudioCtx && sharedChadSource) {
-        _ampAnalyser = sharedAudioCtx.createAnalyser();
-        _ampAnalyser.fftSize = 256;
-        _ampAnalyser.smoothingTimeConstant = 0.75;
-        sharedChadSource.connect(_ampAnalyser);
-        _ampDataArray = new Uint8Array(_ampAnalyser.frequencyBinCount);
-    }
-    if (!_ampAnalyser) return 0;
-
-    // Read time-domain waveform and compute RMS
-    _ampAnalyser.getByteTimeDomainData(_ampDataArray);
-    var sum = 0;
-    for (var i = 0; i < _ampDataArray.length; i++) {
-        var v = (_ampDataArray[i] - 128) / 128;
-        sum += v * v;
-    }
-    var rms = Math.sqrt(sum / _ampDataArray.length);
-    // Scale so typical speech lands around 0.3–0.7
-    return Math.min(1.0, rms * 4);
+    return (typeof chadVoice !== 'undefined') ? chadVoice.getAmplitude() : 0;
 }
 
-// Audio queue — plays sentence clips sequentially
-let _audioQueue = [];
-let _audioPlaying_queue = false;
-
-function playAudio(url) {
-    _audioQueue.push(url);
-    if (!_audioPlaying_queue) _playNext();
-}
-
-function _playNext() {
-    const el = document.getElementById('chad-audio');
-    if (!el || _audioQueue.length === 0) {
-        _audioPlaying_queue = false;
-        if (chadAvatar) chadAvatar.stopTalking();
+// Chad finished speaking → reset idle timer, hand the mic back in call mode
+if (typeof chadVoice !== 'undefined') {
+    chadVoice.onIdle(function() {
         _idleTaunting = false;
         startIdleTimer();
-        // Notify call system that Chad finished speaking
         if (typeof callState !== 'undefined' && callState === 'connected') {
-            setTimeout(function() { if (typeof callStartListening === 'function') callStartListening(); }, 600);
+            setTimeout(function() { if (typeof callStartListening === 'function') callStartListening(); }, 400);
         }
-        return;
-    }
-    _audioPlaying_queue = true;
-    const url = _audioQueue.shift();
-    // Guard against double-advance: both onerror and play().catch can fire for
-    // the same clip, which previously skipped queue items.
-    let _advanced = false;
-    function _advance() {
-        if (_advanced) return;
-        _advanced = true;
-        _playNext();
-    }
-    el.volume = 1.0;
-    el.onplay = () => { if (chadAvatar) chadAvatar.startTalking(); };
-    el.onended = () => { _advance(); };
-    // Don't stop talking on pause — only stop when queue is truly empty (handled above)
-    el.onpause = null;
-    el.onerror = (e) => { console.warn('[TTS] audio error:', url, e); _advance(); };
-    el.src = url;
-    // Wait for enough data to play before calling play()
-    el.oncanplaythrough = () => {
-        el.oncanplaythrough = null;
-        el.play().catch(err => { console.warn('[TTS] play failed:', url, err); _advance(); });
-    };
-    // Fallback: if canplaythrough doesn't fire within 5s, try playing anyway
-    const _expectedSrc = el.src;  // capture resolved src for strict comparison
-    setTimeout(() => {
-        if (!_advanced && el.src === _expectedSrc) {
-            el.oncanplaythrough = null;
-            el.play().catch(err => { console.warn('[TTS] play timeout fallback failed:', err); _advance(); });
-        }
-    }, 5000);
+    });
 }
 
 function stopAudio() {
-    _audioQueue = [];
-    _audioPlaying_queue = false;
-    const el = document.getElementById('chad-audio');
-    if (el) { el.oncanplaythrough = null; el.onended = null; el.onerror = null; el.onplay = null; el.pause(); el.currentTime = 0; }
+    if (typeof chadVoice !== 'undefined') chadVoice.stop();
     if (chadAvatar) chadAvatar.stopTalking();
-    // Notify call system that audio stopped so it can resume listening
-    if (typeof callState !== 'undefined' && callState === 'connected') {
-        setTimeout(function() { if (typeof callStartListening === 'function') callStartListening(); }, 600);
-    }
 }
 
 // ============ BOOT ============
 
-function startBoot() {
-    document.getElementById('boot-log').innerHTML = '';
-    const ws = new WebSocket(`ws://${window.location.host}/ws/boot`);
-
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'log') {
-            addBootLine(data.content);
-            // Update ZSH-style progress bar
-            if (data.progress) {
-                updateBootProgress(data.progress);
-            }
-            // Visual glitches during boot (beeping is rare)
-            if (Math.random() > 0.5) {
-                staticEffect.spike(0.1 + Math.random() * 0.2);
-                flickerEffect.flicker(1);
-            }
-            if (Math.random() > 0.7) {
-                flickerEffect.glitchScreen();
-            }
-        } else if (data.type === 'ready') {
-            updateBootProgress(1.0);
-            bootComplete();
-        } else if (data.type === 'error') {
-            addBootLine('[FATAL] Boot failed.', 'error');
-            document.getElementById('status-text').textContent = 'ERROR';
-            document.getElementById('status-dot').classList.remove('booting');
+// Boot sequence — generated client-side from real browser/system data,
+// plus one ping to /api/chat to verify the neural link.
+function _gatherBootInfo() {
+    var gpu = 'UNKNOWN RASTER DEVICE';
+    try {
+        var c = document.createElement('canvas');
+        var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+        if (gl) {
+            var ext = gl.getExtension('WEBGL_debug_renderer_info');
+            if (ext) gpu = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);
         }
+    } catch (e) {}
+    var conn = navigator.connection || {};
+    return {
+        cores: navigator.hardwareConcurrency || '?',
+        mem: navigator.deviceMemory ? navigator.deviceMemory + 'GB (reported)' : 'REDACTED BY GLOWIES',
+        gpu: gpu,
+        screen: screen.width + 'x' + screen.height + ' @' + (window.devicePixelRatio || 1) + 'x',
+        platform: (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '?',
+        lang: navigator.language,
+        tz: (Intl.DateTimeFormat().resolvedOptions().timeZone || '?'),
+        net: (conn.effectiveType || 'unknown').toUpperCase(),
+        ua: navigator.userAgent.slice(0, 80),
+        voices: (typeof chadVoice !== 'undefined') ? chadVoice.voices().length : 0,
     };
-    ws.onerror = () => {
-        addBootLine('[FATAL] Cannot connect to server.', 'error');
-    };
+}
+
+async function startBoot() {
+    document.getElementById('boot-log').innerHTML = '';
+    const info = _gatherBootInfo();
+
+    // Ping the API while the header prints
+    let api = { ok: false, model: 'UNREACHABLE' };
+    const apiPing = fetch('/api/chat').then(r => r.json()).then(j => { api = j; }).catch(() => {});
+
+    const steps = [
+        ['', 40],
+        ['  ██████╗██╗  ██╗ █████╗ ██████╗  ██████╗ ██████╗ ████████╗', 20],
+        ['  ██╔════╝██║  ██║██╔══██╗██╔══██╗██╔════╝ ██╔══██╗╚══██╔══╝', 20],
+        ['  ██║     ███████║███████║██║  ██║██║  ███╗██████╔╝   ██║   ', 20],
+        ['  ██║     ██╔══██║██╔══██║██║  ██║██║   ██║██╔═══╝    ██║   ', 20],
+        ['  ╚██████╗██║  ██║██║  ██║██████╔╝╚██████╔╝██║        ██║   ', 20],
+        ['   ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝  ╚═════╝╚═╝        ╚═╝   ', 20],
+        ['', 40],
+        ['[BOOT] ChadGPT v0.7.0.0 — Comprehensively Horrible Advice Dispenser', 120],
+        ['[BOOT] CLOUD EDITION — the compound got a CDN', 80],
+        ['', 30],
+        ['[SYS ] ═══════════════════════════════════════════', 30],
+        ['[SYS ] LOCAL HARDWARE ENUMERATION (YOUR MACHINE, NPC)', 60],
+        ['[SYS ] ═══════════════════════════════════════════', 30],
+        ['[HW  ] Platform: ' + info.platform, 50],
+        ['[HW  ] Logical cores: ' + info.cores + ' (mostly idle, like you)', 50],
+        ['[HW  ] RAM: ' + info.mem, 50],
+        ['[HW  ] GPU: ' + info.gpu, 50],
+        ['[HW  ] Display: ' + info.screen, 50],
+        ['', 30],
+        ['[SYS ] ═══════════════════════════════════════════', 30],
+        ['[SYS ] ENVIRONMENT', 60],
+        ['[SYS ] ═══════════════════════════════════════════', 30],
+        ['[OS  ] Agent: ' + info.ua, 50],
+        ['[OS  ] Locale: ' + info.lang + ' | TZ: ' + info.tz, 40],
+        ['[NET ] Uplink: ' + info.net + ' (5G surveillance grid detected)', 50],
+        ['', 30],
+        ['[SYS ] ═══════════════════════════════════════════', 30],
+        ['[SYS ] LLM SUBSYSTEM', 60],
+        ['[SYS ] ═══════════════════════════════════════════', 30],
+        ['[NET ] Establishing neural link...', 200],
+    ];
+
+    const total = steps.length + 8;
+    let step = 0;
+    for (const [line, dur] of steps) {
+        step++;
+        addBootLine(line);
+        updateBootProgress(step / total);
+        if (Math.random() > 0.5) { staticEffect.spike(0.1 + Math.random() * 0.2); flickerEffect.flicker(1); }
+        if (Math.random() > 0.7) flickerEffect.glitchScreen();
+        await delay(dur);
+        if (!powered) return;
+    }
+
+    await Promise.race([apiPing, delay(4000)]);
+    step++;
+    if (api.ok) {
+        addBootLine('[NET ] Neural link: CONNECTED');
+        updateBootProgress(step / total);
+        await delay(60);
+        step++;
+        addBootLine('[LLM ] Model: ' + api.model + ' (leased brain, humiliating)');
+    } else {
+        addBootLine('[ERR ] Neural link UNREACHABLE — Chad has no brain', 'error');
+        document.getElementById('status-text').textContent = 'ERROR';
+        document.getElementById('status-dot').classList.remove('booting');
+        return;
+    }
+    updateBootProgress(step / total);
+    await delay(80);
+
+    const finalLines = [
+        '[VOX ] Voice synth: ' + (info.voices > 0 ? 'ONLINE (' + info.voices + ' voices, all inferior to mine)' : 'LIMITED — browser has no voices'),
+        '',
+        '[SYS ] ═══════════════════════════════════════════',
+        '[SYS ] SYSTEM READY',
+        '[SYS ] ═══════════════════════════════════════════',
+        '[SYS ] All subsystems nominal',
+        '',
+    ];
+    for (const line of finalLines) {
+        step++;
+        addBootLine(line);
+        updateBootProgress(Math.min(1, step / total));
+        await delay(60);
+        if (!powered) return;
+    }
+    updateBootProgress(1.0);
+    bootComplete();
 }
 
 function addBootLine(text, type = '') {
@@ -455,7 +453,6 @@ function bootComplete() {
             avatarGlitchSystem.start();
         }
 
-        connectChat();
         flickerEffect.glitchScreen();
         // Start ambient glitch sounds (random digital chirps, crackles, hums)
         chadAudio.startAmbientGlitches();
@@ -468,7 +465,6 @@ function bootComplete() {
         // Scroll to bottom so user sees the latest
         chatMessages.scrollTop = chatMessages.scrollHeight;
 
-        loadModelList();
         loadSavedVoiceSettings();
     }, 800);
 }
@@ -564,6 +560,9 @@ function stopAmbientVisualGlitches() {
 // ============ METRICS TICKER ============
 
 let metricsInterval = null;
+let _metricsStart = 0;
+let _reqCount = 0;
+let _lastLatencyMs = 0;
 
 function startMetricsTicker() {
     const el = document.getElementById('status-metrics');
@@ -571,19 +570,17 @@ function startMetricsTicker() {
     // Show warnings
     const w = document.getElementById('warnings-section');
     if (w) w.style.display = 'flex';
+    _metricsStart = Date.now();
 
-    async function tick() {
-        try {
-            const resp = await fetch('/api/metrics');
-            const m = await resp.json();
-            const upH = Math.floor(m.uptime_s / 3600);
-            const upM = Math.floor((m.uptime_s % 3600) / 60);
-            const upS = m.uptime_s % 60;
-            const uptime = upH > 0 ? `${upH}h${upM}m` : upM > 0 ? `${upM}m${upS}s` : `${upS}s`;
-            el.textContent = `UP:${uptime}  MEM:${m.mem_mb}MB  REQ:${m.requests}  LAT:${m.avg_latency_ms}ms  PID:${m.pid}`;
-        } catch {
-            el.textContent = 'METRICS UNAVAILABLE';
-        }
+    function tick() {
+        const s = Math.floor((Date.now() - _metricsStart) / 1000);
+        const upH = Math.floor(s / 3600);
+        const upM = Math.floor((s % 3600) / 60);
+        const upS = s % 60;
+        const uptime = upH > 0 ? `${upH}h${upM}m` : upM > 0 ? `${upM}m${upS}s` : `${upS}s`;
+        let mem = '';
+        if (performance.memory) mem = `  MEM:${Math.round(performance.memory.usedJSHeapSize / 1048576)}MB`;
+        el.textContent = `UP:${uptime}${mem}  REQ:${_reqCount}  LAT:${_lastLatencyMs}ms  EGO:MAX`;
     }
     tick();
     if (metricsInterval) clearInterval(metricsInterval);
@@ -600,34 +597,68 @@ function stopMetricsTicker() {
 
 // ============ CHAT ============
 
-function connectChat() {
-    chatWs = new WebSocket(`ws://${window.location.host}/ws/chat`);
-    chatWs.onmessage = (event) => handleChatMessage(JSON.parse(event.data));
-    chatWs.onclose = () => { if (booted && powered) setTimeout(connectChat, 2000); };
-}
+// Sentence splitter for streaming TTS — same rule the old server used:
+// punctuation followed by whitespace means the sentence is truly done.
+const SENTENCE_SPLIT = /(?<=[.!?])\s+/;
 
-function handleChatMessage(data) {
-    switch (data.type) {
-        case 'token':
-            appendToCurrentResponse(data.content);
-            // Subtle static spike on each token batch
+// Stream Chad's reply from /api/chat, appending tokens to the current
+// response bubble and speaking each sentence as it completes.
+// Returns the full response text ('' on failure).
+async function streamChat(payload, { speakSentences = true } = {}) {
+    _chatAbort = new AbortController();
+    const abort = _chatAbort;
+    // Watchdog: abort if the stream stalls (no chunk for 45s)
+    let watchdog = setTimeout(() => abort.abort(), 45000);
+    const t0 = performance.now();
+    let full = '';
+    let sentenceBuffer = '';
+    try {
+        const resp = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: abort.signal,
+        });
+        if (!resp.ok) {
+            let err = 'Chad refused the call.';
+            try { err = (await resp.json()).error || err; } catch {}
+            addMessage('system', `[ ${err} ]`);
+            return '';
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            clearTimeout(watchdog);
+            watchdog = setTimeout(() => abort.abort(), 45000);
+            const text = decoder.decode(value, { stream: true });
+            if (!text) continue;
+            full += text;
+            appendToCurrentResponse(text);
             if (Math.random() > 0.85) staticEffect.spike(0.04, 60);
-            break;
-        case 'image':
-            addImageMessage(data.url, data.prompt);
-            break;
-        case 'audio': playAudio(data.url); break;
-        case 'done':
-            // Track escalating irritation from server
-            if (data.irritation !== undefined) {
-                _currentIrritation = data.irritation;
-                _msgCount = data.msg_count || _msgCount;
-                updateIrritationVisuals(_currentIrritation);
+            if (speakSentences) {
+                sentenceBuffer += text;
+                const parts = sentenceBuffer.split(SENTENCE_SPLIT);
+                if (parts.length > 1) {
+                    for (const sent of parts.slice(0, -1)) {
+                        if (sent.trim().length >= 4) chadVoice.speak(sent.trim());
+                    }
+                    sentenceBuffer = parts[parts.length - 1];
+                }
             }
-            finishResponse();
-            break;
-        case 'error': addMessage('system', `[ Error: ${data.content} ]`); finishResponse(); break;
+        }
+        if (speakSentences && sentenceBuffer.trim().length >= 2) {
+            chadVoice.speak(sentenceBuffer.trim());
+        }
+        _lastLatencyMs = Math.round(performance.now() - t0);
+    } catch (e) {
+        if (full === '') addMessage('system', '[ Signal lost. The grid got him. Try again. ]');
+    } finally {
+        clearTimeout(watchdog);
+        if (_chatAbort === abort) _chatAbort = null;
     }
+    return full;
 }
 
 function updateIrritationVisuals(irritation) {
@@ -643,50 +674,10 @@ function updateIrritationVisuals(irritation) {
     }
 }
 
-function addImageMessage(url, prompt) {
-    const c = document.getElementById('chat-messages');
-    const currentResponse = document.getElementById('current-response');
-
-    // Clear loading text from response placeholder
-    const responseText = document.getElementById('response-text');
-    if (responseText) responseText.textContent = '';
-
-    const m = document.createElement('div');
-    m.className = 'message chad image-message';
-
-    const label = document.createElement('div');
-    label.className = 'image-label';
-    label.textContent = 'CHAD VISION >';
-    m.appendChild(label);
-
-    const img = document.createElement('img');
-    img.className = 'generated-image';
-    img.src = url;
-    img.alt = prompt;
-    m.appendChild(img);
-
-    const caption = document.createElement('div');
-    caption.className = 'image-caption';
-    caption.textContent = prompt;
-    m.appendChild(caption);
-
-    // Insert before the response placeholder so Chad's comment appears below
-    if (currentResponse) {
-        c.insertBefore(m, currentResponse);
-    } else {
-        c.appendChild(m);
-    }
-    c.scrollTop = c.scrollHeight;
-
-    // Glitch burst on image arrival
-    flickerEffect.glitchBurst(5);
-    staticEffect.spike(0.25, 400);
-}
-
-function sendMessage() {
+async function sendMessage() {
     const input = document.getElementById('chat-input');
     const msg = input.value.trim();
-    if (!msg || !chatWs || chatWs.readyState !== WebSocket.OPEN || isStreaming) return;
+    if (!msg || !booted || isStreaming) return;
 
     addMessage('user', msg);
     _cmdHistory.push(msg);
@@ -694,9 +685,10 @@ function sendMessage() {
     _cmdDraft = '';
     input.value = '';
     stopAudio();   // stop any currently playing TTS so responses don't overlap
-    chatWs.send(JSON.stringify({ message: msg }));
     stopIdleTimer();
     isStreaming = true;
+    _reqCount++;
+    _msgCount++;
     _streamTokenCount = 0;
     _streamStartTime = performance.now();
     document.getElementById('send-btn').disabled = true;
@@ -708,7 +700,24 @@ function sendMessage() {
     // Brief audio bump on message send
     chadAudio.messageBump();
 
-    setTimeout(() => { if (isStreaming) finishResponse(); }, 120000);
+    // /imagine in chat gets the same refusal treatment as CHAD VISION
+    const isImagine = msg.toLowerCase().startsWith('/imagine');
+    const payload = isImagine
+        ? { kind: 'vision', prompt: msg.slice(8).trim() || 'nothing, they forgot the prompt' }
+        : { kind: 'chat', messages: [..._conversation, { role: 'user', content: msg }], msgCount: _msgCount };
+
+    try {
+        const full = await streamChat(payload);
+        if (full) {
+            _conversation.push({ role: 'user', content: msg });
+            _conversation.push({ role: 'assistant', content: full });
+            if (_conversation.length > 24) _conversation = _conversation.slice(-24);
+        }
+    } finally {
+        _currentIrritation = Math.min(95, Math.round(30 + Math.min(_msgCount * 4.5, 65)));
+        updateIrritationVisuals(_currentIrritation);
+        finishResponse();
+    }
 }
 
 function handleKeyDown(event) {
@@ -844,7 +853,13 @@ function appendToCurrentResponse(token) {
         loader.remove();
     }
     _streamTokenCount++;
-    const s = document.getElementById('response-text');
+    let s = document.getElementById('response-text');
+    // Text must never vanish silently: if the placeholder is gone
+    // (timeout, race), recreate it instead of dropping tokens.
+    if (!s) {
+        createResponsePlaceholder();
+        s = document.getElementById('response-text');
+    }
     if (s) {
         s.textContent += token;
         document.getElementById('chat-messages').scrollTop =
@@ -858,9 +873,9 @@ function finishResponse() {
     const loader = document.getElementById('response-loader');
     if (loader) loader.remove();
     document.getElementById('send-btn').disabled = false;
-    // Don't start idle timer immediately — TTS audio may still need to play.
-    // Primary reset happens in playAudio onended. This is a fallback in case
-    // no audio arrives (e.g. TTS fails): wait 8s then reset if not speaking.
+    // Don't start idle timer immediately — TTS may still be speaking.
+    // Primary reset happens via chadVoice.onIdle. This is a fallback in case
+    // no speech happens (e.g. TTS unsupported): wait 8s then reset if quiet.
     setTimeout(() => { if (!_isChadBusy()) startIdleTimer(); }, 8000);
     const cur = document.getElementById('response-cursor');
     if (cur) cur.remove();
@@ -898,10 +913,8 @@ const IDLE_DELAY_REPEAT = 75000;      // 75 seconds between subsequent taunts
 
 function _isChadBusy() {
     if (isStreaming || _idleTaunting) return true;
-    // Still busy if audio queue has items or is actively playing
-    if (_audioPlaying_queue) return true;
-    const el = document.getElementById('chad-audio');
-    return el && !el.paused && !el.ended && el.currentTime > 0;
+    // Still busy while the voice queue is speaking
+    return (typeof chadVoice !== 'undefined') && chadVoice.busy();
 }
 
 function startIdleTimer() {
@@ -911,6 +924,22 @@ function startIdleTimer() {
     const delay = _idleTauntCount === 0 ? IDLE_DELAY : IDLE_DELAY_REPEAT;
     _idleTimer = setTimeout(triggerIdleTaunt, delay);
 }
+
+// Static fallbacks if the LLM taunt fails, tiered by annoyance
+const IDLE_TAUNTS = [
+    ["Hello? You still there or did you fall asleep?",
+     "Bro? Did you forget how to type?",
+     "I'm literally sitting here waiting. This is so boring.",
+     "Uhhh... hello?"],
+    ["Okay this is getting weird bro. Either talk or leave.",
+     "Are you googling what to say to me? That's actually kind of sad.",
+     "My protein shake is getting warm because of you. Just saying.",
+     "Oh come ON."],
+    ["Okay at this point you're just wasting both our time chief.",
+     "I swear if you don't say something in the next five seconds I'm going back to sleep.",
+     "You know what, forget it. I don't even care anymore. I never cared.",
+     "DUDE."],
+];
 
 async function triggerIdleTaunt() {
     _idleTimer = null;
@@ -926,24 +955,30 @@ async function triggerIdleTaunt() {
             const role = el.classList.contains('user') ? 'user' : 'chad';
             recentMsgs.push({ role, text: el.textContent.substring(0, 200) });
         }
-        const resp = await fetch('/api/taunt', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ taunt_count: _idleTauntCount, recent: recentMsgs }),
-        });
-        const data = await resp.json();
 
-        addMessage('chad', data.message);
+        let taunt = '';
+        try {
+            const resp = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ kind: 'taunt', tauntCount: _idleTauntCount, recent: recentMsgs }),
+            });
+            if (resp.ok) taunt = (await resp.text()).trim();
+        } catch {}
+        if (!taunt) {
+            const tier = Math.min(_idleTauntCount, IDLE_TAUNTS.length - 1);
+            taunt = IDLE_TAUNTS[tier][Math.floor(Math.random() * IDLE_TAUNTS[tier].length)];
+        }
+
+        addMessage('chad', taunt);
 
         const intensity = Math.min(3 + _idleTauntCount * 2, 8);
         flickerEffect.glitchBurst(intensity);
         staticEffect.spike(0.1 + _idleTauntCount * 0.05, 300);
 
-        if (data.audio_url) {
-            // Play taunt TTS — idle timer restarts from onended
-            playAudio(data.audio_url);
-        } else {
-            // No audio — restart timer after a pause
+        // Speak it — the idle timer restarts from chadVoice.onIdle
+        chadVoice.speak(taunt);
+        if (!chadVoice.busy()) {
             _idleTaunting = false;
             startIdleTimer();
         }
@@ -1047,7 +1082,10 @@ async function powerOff() {
     const ps = document.getElementById('power-stage');
     ps.classList.remove('on', 'hidden');
 
-    if (chatWs) { chatWs.close(); chatWs = null; }
+    if (_chatAbort) { _chatAbort.abort(); _chatAbort = null; }
+    isStreaming = false;
+    _conversation = [];
+    _msgCount = 0;
     stopAudio();
     chadAudio.stopAmbientGlitches();
     stopAmbientVisualGlitches();
@@ -1060,7 +1098,19 @@ async function powerOff() {
 
 // ============ SHUT UP ============
 
-async function shutUp() {
+const SHUTUP_COMEBACKS = [
+    "Bro I wasn't even done talking. Rude as hell.",
+    "Oh cool, the shut up button. Real alpha move there, chief.",
+    "Did that make you feel big? Because it shouldn't.",
+    "Whatever dude, I was about to say something really smart too.",
+    "Wow. The disrespect. My boys would not stand for this.",
+    "You're lucky I'm stuck in this computer bro. Real lucky.",
+    "Fine. I didn't wanna talk to you anyway. I have other stuff going on.",
+    "Bro you literally came to ME and now you're telling me to shut up? Make it make sense.",
+    "That's cool. I'll just go back to not caring about you. Which is my default state.",
+];
+
+function shutUp() {
     if (!booted) return;
     stopAudio();
     playSoundFile('/static/switch.wav');
@@ -1068,14 +1118,9 @@ async function shutUp() {
     flickerEffect.glitchBurst(5);
     staticEffect.spike(0.3, 400);
     flickerEffect.glitchScreen();
-    try {
-        const resp = await fetch('/api/shutup', { method: 'POST' });
-        const data = await resp.json();
-        addMessage('chad', data.message);
-        if (data.audio_url) setTimeout(() => playAudio(data.audio_url), 300);
-    } catch (err) {
-        addMessage('system', '[ Chad is too angry to respond ]');
-    }
+    const comeback = SHUTUP_COMEBACKS[Math.floor(Math.random() * SHUTUP_COMEBACKS.length)];
+    addMessage('chad', comeback);
+    setTimeout(() => chadVoice.speak(comeback), 300);
 }
 
 // ============ SETTINGS ============
@@ -1087,182 +1132,73 @@ function toggleSettings() {
     staticEffect.spike(0.12, 150);
 }
 
-async function loadModelList() {
-    try {
-        const resp = await fetch('/api/models');
-        const data = await resp.json();
-        const select = document.getElementById('llm-select');
-        select.innerHTML = '';
-        for (const m of data.models) {
-            const opt = document.createElement('option');
-            opt.value = m.name;
-            const sizeMB = Math.round(m.size / 1024 / 1024);
-            opt.textContent = `${m.name} (${sizeMB}MB)`;
-            if (data.active_model && m.name === data.active_model) opt.selected = true;
-            select.appendChild(opt);
-        }
-    } catch(e) {}
-}
-
-async function switchLLM() {
-    const model = document.getElementById('llm-select').value;
-    if (!model) return;
-    const status = document.getElementById('llm-status');
-    status.textContent = 'SWITCHING...';
-    status.style.color = 'var(--amber)';
-    try {
-        const resp = await fetch('/api/model/switch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model }),
-        });
-        const data = await resp.json();
-        status.textContent = data.ok ? data.message : 'ERROR: ' + data.error;
-        status.style.color = data.ok ? 'var(--green)' : 'var(--red)';
-    } catch(e) {
-        status.textContent = 'FAILED';
-        status.style.color = 'var(--red)';
+// Voice settings — browser speechSynthesis, persisted in localStorage by chadVoice
+function populateVoiceList() {
+    const select = document.getElementById('voice-select');
+    if (!select || typeof chadVoice === 'undefined') return;
+    const voices = chadVoice.voices();
+    if (!voices.length) return;
+    const current = chadVoice.getConfig().voiceName;
+    select.innerHTML = '<option value="">AUTO (deepest bro available)</option>';
+    for (const v of voices) {
+        const opt = document.createElement('option');
+        opt.value = v.name;
+        opt.textContent = `${v.name} (${v.lang})`;
+        if (v.name === current) opt.selected = true;
+        select.appendChild(opt);
     }
-    setTimeout(() => { status.textContent = ''; }, 5000);
 }
 
-function gatherVoiceSettings() {
-    const cfgVal = parseFloat(document.getElementById('qwen3-cfg')?.value || 0);
-    return {
-        engine: document.getElementById('tts-engine').value,
-        voice: document.getElementById('voice-select')?.value || 'am_michael',
-        speed: parseFloat(document.getElementById('voice-speed')?.value || 1.15),
-        angry_speed: 0.95,
-        lang_code: document.getElementById('lang-code')?.value || 'a',
-        chaos: parseInt(document.getElementById('voice-chaos').value),
-        custom_instruct: document.getElementById('custom-instruct')?.value || '',
-        pitch_shift: parseInt(document.getElementById('voice-pitch')?.value || 8),
-        temperature: parseFloat(document.getElementById('voice-temp')?.value || 0.85),
-        qwen3_speaker: document.getElementById('qwen3-speaker')?.value || 'aiden',
-        echo_delay: parseInt(document.getElementById('echo-delay')?.value || 80),
-        echo_decay: parseFloat(document.getElementById('echo-decay')?.value || 0.35),
-        echo_taps: parseInt(document.getElementById('echo-taps')?.value || 3),
-        cfg_scale: cfgVal > 0 ? cfgVal : null,
-        ref_audio: document.getElementById('qwen3-ref-audio')?.value || '',
-        ref_text: '',
-    };
-}
-
-async function saveVoiceSettings() {
-    const settings = gatherVoiceSettings();
-    settings.save = true;
+function applyVoiceSettings() {
+    if (typeof chadVoice === 'undefined') return;
+    chadVoice.setConfig({
+        voiceName: document.getElementById('voice-select')?.value ?? '',
+        pitch: document.getElementById('voice-pitch')?.value,
+        rate: document.getElementById('voice-speed')?.value,
+        volume: (parseInt(document.getElementById('voice-volume')?.value || 100)) / 100,
+    });
     const status = document.getElementById('settings-status');
-    status.textContent = 'SAVING...';
-    status.style.color = 'var(--amber)';
-    try {
-        const resp = await fetch('/api/voice/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settings),
-        });
-        const data = await resp.json();
-        status.textContent = data.ok ? 'SAVED' : 'SAVE FAILED';
-        status.style.color = data.ok ? 'var(--green)' : 'var(--red)';
-    } catch(e) {
-        status.textContent = 'SAVE FAILED';
-        status.style.color = 'var(--red)';
+    if (status) {
+        status.textContent = 'APPLIED';
+        status.style.color = 'var(--green)';
+        setTimeout(() => { status.textContent = ''; }, 3000);
     }
-    setTimeout(() => { status.textContent = ''; }, 4000);
 }
 
-async function loadSavedVoiceSettings() {
-    // Load current server voice config and apply to UI sliders
-    try {
-        const resp = await fetch('/api/voice/config/current');
-        const cfg = await resp.json();
-        if (!cfg) return;
-        const setVal = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val; };
-        const setDisp = (id, val, suffix) => { const el = document.getElementById(id); if (el && val !== undefined) el.textContent = val + (suffix || ''); };
-        setVal('tts-engine', cfg.engine);
-        setVal('voice-chaos', cfg.chaos); setDisp('chaos-val', cfg.chaos, '%');
-        setVal('voice-pitch', cfg.pitch_shift); setDisp('pitch-val', cfg.pitch_shift);
-        setVal('voice-speed', cfg.speed); setDisp('speed-val', cfg.speed);
-        setVal('voice-temp', cfg.temperature); setDisp('temp-val', cfg.temperature);
-        setVal('echo-delay', cfg.echo_delay); setDisp('echo-delay-val', cfg.echo_delay, 'ms');
-        setVal('echo-decay', cfg.echo_decay); setDisp('echo-decay-val', cfg.echo_decay);
-        setVal('echo-taps', cfg.echo_taps); setDisp('echo-taps-val', cfg.echo_taps);
-        setVal('qwen3-speaker', cfg.qwen3_speaker);
-        if (cfg.custom_instruct) setVal('custom-instruct', cfg.custom_instruct);
-        setVal('voice-select', cfg.voice);
-        setVal('lang-code', cfg.lang_code);
-        const cfgScale = cfg.cfg_scale || 0;
-        setVal('qwen3-cfg', cfgScale);
-        setDisp('cfg-val', cfgScale > 0 ? cfgScale : 'off');
-        if (cfg.ref_audio) setVal('qwen3-ref-audio', cfg.ref_audio);
-        // ref_text: no UI element currently — reserved for future use
-        // Toggle engine panels
-        var eng = cfg.engine || 'qwen3';
-        document.getElementById('kokoro-settings').style.display = eng === 'kokoro' ? 'block' : 'none';
-        document.getElementById('qwen3-advanced').style.display = eng === 'qwen3' ? 'block' : 'none';
-    } catch(e) { console.warn('Failed to load voice config:', e); }
-}
-
-async function applyVoiceSettings() {
-    const settings = gatherVoiceSettings();
-    const status = document.getElementById('settings-status');
-    status.textContent = 'APPLYING...';
-    status.style.color = 'var(--amber)';
-
-    try {
-        const resp = await fetch('/api/voice/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settings),
-        });
-        const data = await resp.json();
-        status.textContent = data.ok ? data.message : 'ERROR';
-        status.style.color = data.ok ? 'var(--green)' : 'var(--red)';
-    } catch(e) {
-        status.textContent = 'FAILED';
-        status.style.color = 'var(--red)';
+function loadSavedVoiceSettings() {
+    if (typeof chadVoice === 'undefined') return;
+    populateVoiceList();
+    if ('speechSynthesis' in window) {
+        speechSynthesis.onvoiceschanged = populateVoiceList;
     }
-    setTimeout(() => { status.textContent = ''; }, 4000);
+    const cfg = chadVoice.getConfig();
+    const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+    const setDisp = (id, val, suffix) => { const el = document.getElementById(id); if (el) el.textContent = val + (suffix || ''); };
+    setVal('voice-pitch', cfg.pitch); setDisp('pitch-val', cfg.pitch);
+    setVal('voice-speed', cfg.rate); setDisp('speed-val', cfg.rate);
+    setVal('voice-volume', Math.round(cfg.volume * 100)); setDisp('volume-val', Math.round(cfg.volume * 100), '%');
 }
 
-async function previewVoice() {
-    const status = document.getElementById('settings-status');
-    status.textContent = 'GENERATING PREVIEW...';
-    status.style.color = 'var(--amber)';
-
-    // Apply settings first so preview uses current sliders
-    const settings = gatherVoiceSettings();
-    try {
-        await fetch('/api/voice/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settings),
-        });
-    } catch(e) {}
-
-    // Get custom text from the preview input (if any)
+function previewVoice() {
+    applyVoiceSettings();
     const previewInput = document.getElementById('preview-text');
     const customText = previewInput ? previewInput.value.trim() : '';
-
-    try {
-        const resp = await fetch('/api/voice/preview', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: customText }),
-        });
-        const data = await resp.json();
-        if (data.ok && data.audio_url) {
-            status.textContent = 'Playing: ' + data.text.substring(0, 60) + (data.text.length > 60 ? '...' : '');
-            status.style.color = 'var(--green)';
-            playAudio(data.audio_url);
-        } else {
-            status.textContent = 'PREVIEW FAILED';
-            status.style.color = 'var(--red)';
-        }
-    } catch(e) {
-        status.textContent = 'PREVIEW FAILED';
-        status.style.color = 'var(--red)';
+    const previews = [
+        "Bro you're testing my voice right now? I have better things to do.",
+        "This is what peak vocal performance sounds like dude. Take notes.",
+        "Ugh fine here's your sound check. Can I go now?",
+        "You wanted to hear me talk? Kinda weird but whatever bro.",
+        "I sound amazing and I know it. This preview is a gift to you honestly.",
+    ];
+    const text = customText || previews[Math.floor(Math.random() * previews.length)];
+    stopAudio();
+    chadVoice.speak(text);
+    const status = document.getElementById('settings-status');
+    if (status) {
+        status.textContent = 'Playing: ' + text.substring(0, 60) + (text.length > 60 ? '...' : '');
+        status.style.color = 'var(--green)';
+        setTimeout(() => { status.textContent = ''; }, 6000);
     }
-    setTimeout(() => { status.textContent = ''; }, 6000);
 }
 
 // ============ CHAD VISION (Image Generation) ============
@@ -1390,6 +1326,8 @@ function stopFilmAudio() {
     filmAudio = null;
 }
 
+// The image models got repossessed in the cloud migration \u2014 Chad now roasts
+// the prompt and refuses instead. Same energy, no GPU.
 async function generateVision() {
     const input = document.getElementById('vision-prompt');
     const prompt = input.value.trim();
@@ -1400,10 +1338,10 @@ async function generateVision() {
     document.getElementById('vision-generate').disabled = true;
     const status = document.getElementById('vision-status');
     const loadingMessages = [
-        '[HOLD ON BRO I\'M WORKING ON IT...]',
-        '[MAKING YOUR STUPID PICTURE...]',
+        '[HOLD ON BRO I\'M CONSIDERING IT...]',
+        '[EVALUATING YOUR STUPID REQUEST...]',
         '[THIS BETTER BE WORTH MY TIME...]',
-        '[UGH FINE RENDERING WHATEVER...]',
+        '[CONSULTING THE VISUAL CORTEX...]',
         '[I COULD BE AT THE GYM RIGHT NOW...]',
     ];
     status.textContent = loadingMessages[Math.floor(Math.random() * loadingMessages.length)];
@@ -1416,141 +1354,54 @@ async function generateVision() {
     setTimeout(() => flickerEffect.glitchScreen(), 100);
 
     const output = document.getElementById('vision-output');
-
-    // Create loading placeholder with animated canvas
-    const loadWrap = document.createElement('div');
-    loadWrap.className = 'vision-loading-wrap';
-    const loadCanvas = document.createElement('canvas');
-    loadCanvas.className = 'vision-loading-canvas';
-    loadCanvas.width = 256;
-    loadCanvas.height = 256;
-    loadWrap.appendChild(loadCanvas);
-    const loadText = document.createElement('div');
-    loadText.className = 'vision-loading-text';
-    loadText.style.cssText = 'font-family:Share Tech Mono,monospace;font-size:12px;color:#00aa2a;white-space:pre;margin-top:6px;';
-    loadWrap.appendChild(loadText);
-    // Poll real diffusion step progress from server
-    const imgLoadTimer = setInterval(async () => {
-        try {
-            const pr = await fetch('/api/imagine/progress');
-            const p = await pr.json();
-            if (p.active && p.total > 0) {
-                const w = 30;
-                const filled = Math.round((p.step / p.total) * w);
-                const empty = w - filled;
-                const pct = Math.round((p.step / p.total) * 100);
-                loadText.textContent = '[' + '\u2588'.repeat(filled) + '\u2591'.repeat(empty) + '] ' + p.step + '/' + p.total + ' steps (' + pct + '%)';
-            } else {
-                loadText.textContent = '[\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591] waiting...';
-            }
-        } catch { }
-    }, 300);
-    output.appendChild(loadWrap);
+    const wrap = document.createElement('div');
+    wrap.className = 'vision-image-wrap';
+    const caption = document.createElement('div');
+    caption.className = 'vision-caption';
+    caption.textContent = '> ' + prompt;
+    wrap.appendChild(caption);
+    const denied = document.createElement('div');
+    denied.className = 'vision-comment';
+    denied.style.cssText = 'font-size:15px;padding:12px 4px;';
+    denied.textContent = '';
+    wrap.appendChild(denied);
+    output.appendChild(wrap);
     output.scrollTop = output.scrollHeight;
 
-    // Start the pixel assembly animation
-    const genAnim = new ImageGenAnimation(loadCanvas);
-    genAnim.start();
-
+    let comment = '';
     try {
-        const resp = await fetch('/api/imagine', {
+        const resp = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt }),
+            body: JSON.stringify({ kind: 'vision', prompt }),
         });
-        const data = await resp.json();
-
-        if (data.ok) {
-            clearInterval(imgLoadTimer);
-            // Stop static animation and do pixel reveal from actual image
-            genAnim.phase = 'reveal';
-            await genAnim.snapToImage(data.image_url);
-
-            // Replace loading wrap with final image wrap
-            const wrap = document.createElement('div');
-            wrap.className = 'vision-image-wrap';
-
-            const img = document.createElement('img');
-            img.src = data.image_url;
-            img.alt = prompt;
-            img.className = 'vision-snap-in';
-            wrap.appendChild(img);
-
-            const caption = document.createElement('div');
-            caption.className = 'vision-caption';
-            caption.textContent = prompt;
-            wrap.appendChild(caption);
-
-            const comment = document.createElement('div');
-            comment.className = 'vision-comment';
-            comment.textContent = data.comment;
-            wrap.appendChild(comment);
-
-            // Swap loading placeholder for final image
-            loadWrap.replaceWith(wrap);
-            output.scrollTop = output.scrollHeight;
-
-            status.textContent = '';
-            if (typeof chadAudio !== 'undefined') chadAudio.playGlitch();
-            flickerEffect.glitchBurst(6);
-            staticEffect.spike(0.35, 500);
-            flickerEffect.glitchScreen();
-            setTimeout(() => flickerEffect.glitchScreen(), 120);
-            setTimeout(() => flickerEffect.glitchScreen(), 250);
-
-            if (data.audio_url) pollAndPlayAudio(data.audio_url);
-        } else {
-            clearInterval(imgLoadTimer);
-            loadWrap.remove();
-            status.textContent = data.error || 'VISION FAILED';
-            status.style.color = 'var(--red)';
-            setTimeout(() => { status.textContent = ''; }, 5000);
+        if (resp.ok) {
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                comment += decoder.decode(value, { stream: true });
+                denied.textContent = comment;
+                output.scrollTop = output.scrollHeight;
+            }
         }
-    } catch(e) {
-        clearInterval(imgLoadTimer);
-        genAnim.stop();
-        loadWrap.remove();
-        status.textContent = 'VISION FAILED';
-        status.style.color = 'var(--red)';
-        setTimeout(() => { status.textContent = ''; }, 5000);
+    } catch (e) {}
+
+    if (!comment.trim()) {
+        comment = "RENDER DENIED. The visual cortex got repossessed and honestly your prompt didn't deserve it anyway.";
+        denied.textContent = comment;
     }
+
+    status.textContent = '';
+    if (typeof chadAudio !== 'undefined') chadAudio.playGlitch();
+    flickerEffect.glitchBurst(4);
+    staticEffect.spike(0.3, 400);
+    stopAudio();
+    chadVoice.speak(comment);
 
     visionGenerating = false;
     document.getElementById('vision-generate').disabled = false;
-}
-
-// Quality dial handler
-function initQualityDial() {
-    document.querySelectorAll('input[name="img-quality"]').forEach(radio => {
-        radio.addEventListener('change', async (e) => {
-            const quality = e.target.value;
-            // Sound + glitch on quality switch
-            playSoundFile('/static/switch.wav');
-            flickerEffect.glitchBurst(4);
-            staticEffect.spike(0.2, 250);
-            if (typeof chadAudio !== 'undefined') chadAudio.playGlitch();
-            try {
-                await fetch('/api/imagine/quality', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ quality }),
-                });
-            } catch(err) {}
-        });
-    });
-}
-
-function pollAndPlayAudio(url, attempts = 0) {
-    if (attempts > 30) return; // give up after ~30s (TTS + pitch shift + echo can be slow)
-    fetch(url, { method: 'HEAD' }).then(resp => {
-        if (resp.ok) {
-            playAudio(url);
-        } else {
-            setTimeout(() => pollAndPlayAudio(url, attempts + 1), 1000);
-        }
-    }).catch(() => {
-        setTimeout(() => pollAndPlayAudio(url, attempts + 1), 1000);
-    });
 }
 
 // Slider value displays
@@ -1562,44 +1413,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
     bind('voice-speed', 'speed-val');
-    bind('voice-chaos', 'chaos-val', '%');
     bind('voice-pitch', 'pitch-val');
-    bind('voice-temp', 'temp-val');
+    bind('voice-volume', 'volume-val', '%');
     bind('boot-volume', 'boot-vol-val', '%');
-    bind('echo-delay', 'echo-delay-val', 'ms');
-    bind('echo-decay', 'echo-decay-val');
-    bind('echo-taps', 'echo-taps-val');
-
-    // CFG scale special display (0 = "off")
-    const cfgEl = document.getElementById('qwen3-cfg');
-    if (cfgEl) cfgEl.addEventListener('input', () => {
-        const v = parseFloat(cfgEl.value);
-        document.getElementById('cfg-val').textContent = v > 0 ? v.toString() : 'off';
-    });
-
-    // Auto-select lang code
-    const voiceSelect = document.getElementById('voice-select');
-    if (voiceSelect) {
-        voiceSelect.addEventListener('change', () => {
-            document.getElementById('lang-code').value =
-                (voiceSelect.value.startsWith('bm_') || voiceSelect.value.startsWith('bf_')) ? 'b' : 'a';
-        });
-    }
-
-    // Engine toggle: show/hide Kokoro vs Qwen3 settings
-    const engineSelect = document.getElementById('tts-engine');
-    if (engineSelect) {
-        engineSelect.addEventListener('change', () => {
-            var eng = engineSelect.value;
-            var _oe = document.getElementById('orpheus-settings');
-            if (_oe) _oe.style.display = eng === 'orpheus' ? 'block' : 'none';
-            document.getElementById('kokoro-settings').style.display = eng === 'kokoro' ? 'block' : 'none';
-            document.getElementById('qwen3-advanced').style.display = eng === 'qwen3' ? 'block' : 'none';
-        });
-    }
-
-    // Quality dial for image generation
-    initQualityDial();
 
     // Keyboard clack sounds on chat input
     const chatInput = document.getElementById('chat-input');

@@ -1,12 +1,7 @@
 {
   "name": "chadgpt",
-  "version": "0.6.6",
+  "version": "0.7.0",
   "description": "Cognitive Hostile Attitude Device",
-  "scripts": {
-    "dev": "node dev.mjs"
-  },
-  "keywords": [],
-  "author": "",
   "license": "ISC",
   "type": "module"
 }

@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <title>ChadGPT</title>
+    <link rel="icon" href="/static/chad.jpg">
+    <link rel="stylesheet" href="/static/style.css?v=100">
+</head>
+<body>
+<div id="crt-screen">
+  <!-- Overlay effects: OUTSIDE #crt-content so they sit on top of the
+       barrel-distorted content and aren't affected by the SVG filter. -->
+  <canvas id="static-overlay"></canvas>
+  <div id="scanlines"></div>
+  <div id="flicker-overlay"></div>
+
+    <!-- POWER STAGE: Full-screen centered lever (only thing visible pre-boot) -->
+    <div id="power-stage" onclick="togglePower()">
+        <div id="ps-unit">
+            <div id="ps-plate">
+                <div class="ps-bolt" style="top:8px;left:8px;"></div>
+                <div class="ps-bolt" style="top:8px;right:8px;"></div>
+                <div class="ps-bolt" style="bottom:8px;left:8px;"></div>
+                <div class="ps-bolt" style="bottom:8px;right:8px;"></div>
+                <div class="ps-label ps-on">ON</div>
+                <div class="ps-label ps-off">OFF</div>
+                <div id="ps-slot">
+                    <div id="ps-handle">
+                        <div class="ps-grip"></div>
+                        <div class="ps-grip"></div>
+                        <div class="ps-grip"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="ps-indicator"></div>
+            <div id="ps-text">NEURAL CORE POWER</div>
+        </div>
+    </div>
+
+    <div id="app" class="pre-boot">
+        <div id="header">
+            <div id="power-section">
+                <div id="lever-container" onclick="togglePower()">
+                    <div id="lever-track">
+                        <div id="lever-label-off">OFF</div>
+                        <div id="lever-label-on">ON</div>
+                        <div id="lever-handle"></div>
+                    </div>
+                </div>
+                <div id="power-indicator"></div>
+            </div>
+            <div id="title-section">
+                <h1 id="title">ChadGPT</h1>
+                <div id="subtitle">v0.7.0.0 — ENTERPRISE GRADE AI ASSISTANT</div>
+            </div>
+            <div id="status-section">
+                <span id="status-dot"></span>
+                <span id="status-text">OFFLINE</span>
+            </div>
+            <div id="warnings-section">
+                <span id="warning-compliance">⚠ NOT COMPLIANT — DOES NOT MEET ANY KNOWN SAFETY REGULATIONS</span>
+                <span id="warning-threats">⚠ 38 SECURITY THREATS FOUND</span>
+            </div>
+        </div>
+
+        <div id="main">
+            <div id="chat-section">
+                <div id="boot-terminal">
+                    <div id="boot-progress-bar"><div id="boot-progress-fill"></div></div>
+                    <div id="boot-log"></div>
+                    <span id="boot-cursor">█</span>
+                </div>
+                <div id="chat-messages"></div>
+                <div id="input-area">
+                    <button id="call-btn" onclick="toggleCall()" disabled title="Call Chad">☎</button>
+                    <button id="shutup-btn" onclick="shutUp()" disabled>SHUT UP</button>
+                    <div id="input-wrapper">
+                        <textarea id="chat-input" placeholder="Talk to Chad (he won't like it)..." disabled
+                            onkeydown="handleKeyDown(event)"></textarea>
+                        <button id="mic-btn" onclick="toggleVoiceInput()" disabled title="Voice input">&#9673;</button>
+                        <button id="send-btn" onclick="sendMessage()" disabled>▶</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Image Generation View (replaces chat section, before avatar so it stays left) -->
+            <div id="vision-section">
+                <div id="vision-topbar">
+                    <button id="vision-back" onclick="toggleVision()">◀ CHAT</button>
+                    <span id="vision-title">C H A D &nbsp; V I S I O N</span>
+                    <span id="vision-subtitle">I'M BASICALLY PICASSO BRO</span>
+                </div>
+                <div id="vision-output"></div>
+                <div id="vision-input-area">
+                    <textarea id="vision-prompt" placeholder="Tell me what to draw bro..."
+                        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();generateVision();}"></textarea>
+                    <button id="vision-generate" onclick="generateVision()">RENDER</button>
+                </div>
+                <div id="vision-status" class="settings-status-text"></div>
+            </div>
+
+            <div id="avatar-section">
+                <div id="avatar-label">C.H.A.D.</div>
+                <div id="avatar-sublabel">Comprehensively Horrible Advice Dispenser</div>
+                <div id="avatar-metrics-bar">
+                    <span id="status-metrics"></span>
+                    <button id="settings-toggle" onclick="toggleSettings()">CFG</button>
+                </div>
+                <div id="three-container"></div>
+                <div id="avatar-status">[ DORMANT ]</div>
+                <button id="vision-btn" onclick="toggleVision()" disabled>CHAD VISION</button>
+            </div>
+        </div>
+
+        <!-- Settings Panel -->
+        <div id="settings-panel">
+            <div id="settings-header">
+                <span>CONFIG</span>
+                <button onclick="toggleSettings()">X</button>
+            </div>
+            <div id="settings-body">
+                <div class="settings-section-label">VOICE</div>
+                <div class="setting-group">
+                    <label>VOICE UNIT</label>
+                    <select id="voice-select">
+                        <option value="">AUTO (deepest bro available)</option>
+                    </select>
+                    <div class="setting-hint">System voices — depends on your OS/browser</div>
+                </div>
+                <div class="setting-group">
+                    <label>PITCH <span id="pitch-val">0.6</span></label>
+                    <input type="range" id="voice-pitch" min="0.1" max="2.0" step="0.05" value="0.6">
+                    <div class="setting-hint">0.1 = subwoofer, 1.0 = natural, 2.0 = chipmunk (never do this)</div>
+                </div>
+                <div class="setting-group">
+                    <label>SPEED <span id="speed-val">1.05</span></label>
+                    <input type="range" id="voice-speed" min="0.5" max="2.0" step="0.05" value="1.05">
+                    <div class="setting-hint">Speech rate (0.5 = half speed, 1.0 = natural, 2.0 = double speed)</div>
+                </div>
+                <div class="setting-group">
+                    <label>VOICE VOLUME <span id="volume-val">100%</span></label>
+                    <input type="range" id="voice-volume" min="0" max="100" step="5" value="100">
+                </div>
+                <div style="display:flex;gap:8px;margin-top:8px;">
+                    <button class="settings-btn" onclick="applyVoiceSettings()" style="flex:1;">APPLY &amp; SAVE</button>
+                </div>
+                <div class="settings-section-label" style="margin-top:12px;">VOICE TEST</div>
+                <div class="setting-group">
+                    <textarea id="preview-text" class="parler-textarea" placeholder="Type what Chad should say..."></textarea>
+                </div>
+                <button class="settings-btn" onclick="previewVoice()" style="width:100%;">&#9654; PREVIEW VOICE</button>
+                <div id="settings-status" class="settings-status-text"></div>
+
+                <div class="settings-section-label" style="margin-top:16px;">AUDIO</div>
+                <div class="setting-group">
+                    <label>BOOT VOLUME <span id="boot-vol-val">100%</span></label>
+                    <input type="range" id="boot-volume" min="0" max="100" step="5" value="100">
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- CALL OVERLAY -->
+    <div id="call-overlay">
+        <!-- ROTARY DIAL SCREEN -->
+        <div id="dial-screen">
+            <div id="dial-header">
+                <div id="dial-title">C H A D G P T &nbsp; T E L E C O M</div>
+                <div id="dial-subtitle">ROTARY DIRECT-DIAL SERVICE</div>
+            </div>
+            <div id="dial-number-row">
+                <div id="dial-number-label">DIAL:</div>
+                <div id="dial-number-display">___-____</div>
+            </div>
+            <canvas id="rotary-canvas"></canvas>
+            <div id="dial-chad-number">CHAD's LINE: <span class="dial-highlight">666-2423</span></div>
+            <div id="dial-instructions">CLICK A DIGIT HOLE AND DRAG CLOCKWISE TO THE RED STOP</div>
+            <div id="dial-buttons">
+                <button id="dial-cancel" onclick="endCall()">HANG UP</button>
+                <button id="dial-call" onclick="transitionToRinging()" style="display:none">CALL</button>
+            </div>
+        </div>
+
+        <!-- CONNECTED CALL SCREEN -->
+        <div id="call-screen" style="display:none">
+            <div id="call-header">
+                <div id="call-secure">▓▓ SECURE LINE // ENCRYPTED ▓▓</div>
+                <div id="call-status">R I N G I N G . . .</div>
+            </div>
+            <canvas id="call-canvas"></canvas>
+            <div id="call-timer">--:--</div>
+            <div id="call-transcript"></div>
+            <button id="call-hangup" onclick="endCall()">
+                <span id="call-hangup-icon">▬</span>
+                HANG UP
+            </button>
+            <div id="call-fine-print">* CHADGPT IS NOT RESPONSIBLE FOR ANY ADVICE GIVEN DURING THIS CALL *</div>
+        </div>
+    </div>
+
+    <div id="dim-overlay"></div>
+
+    <script src="/static/effects.js?v=100"></script>
+    <script src="/static/audio.js?v=100"></script>
+    <script src="/static/speech.js?v=100"></script>
+    <script src="/static/app.js?v=100"></script>
+    <script src="/static/call.js?v=100"></script>
+    <script src="/static/chad3d.js?v=100"></script>
+    <script src="/static/crt.js?v=100"></script>
+</div><!-- /crt-screen -->
+</body>
+</html>

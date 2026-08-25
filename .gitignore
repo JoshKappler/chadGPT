@@ -1,5 +1,4 @@
-__pycache__/
-*.pyc
-voices/
 node_modules/
 .env
+.env*.local
+.vercel/

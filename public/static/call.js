@@ -5,9 +5,7 @@ var _callTimer = null;
 var _callStartTime = 0;
 var _callMicStream = null;
 var _callAnalyserMic = null;
-var _callAnalyserChad = null;
 var _callAudioCtx = null;
-var _callChadSource = null;
 var _callMicSource = null;
 var _callAnimFrame = null;
 var _callAutoMicTimer = null;
@@ -135,8 +133,8 @@ function playDialClicks(digit) {
 
 function _callCtx() {
     // Reuse the shared AudioContext from app.js when available
-    if (typeof sharedAudioCtx !== 'undefined' && sharedAudioCtx) {
-        _callAudioCtx = sharedAudioCtx;
+    if (typeof _ensureSharedAudio === 'function') {
+        _callAudioCtx = _ensureSharedAudio();
     }
     if (!_callAudioCtx) _callAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (_callAudioCtx.state === 'suspended') _callAudioCtx.resume();
@@ -541,23 +539,8 @@ function updateDialDisplay() {
 
 function setupCallAnalysers() {
     var ctx = _callCtx();
-
-    if (!_callAnalyserChad) {
-        // Ensure shared audio context + source are set up (from app.js)
-        if (typeof _ensureSharedAudio === 'function') _ensureSharedAudio();
-        if (typeof sharedChadSource !== 'undefined' && sharedChadSource) {
-            try {
-                _callChadSource = sharedChadSource;
-                _callAnalyserChad = ctx.createAnalyser();
-                _callAnalyserChad.fftSize = 256;
-                _callChadSource.connect(_callAnalyserChad);
-            } catch(e) {
-                console.warn('[CALL] Chad analyser connect failed:', e.message);
-            }
-        }
-        // If shared source isn't available yet, retry next frame — don't try
-        // to create a second MediaElementSource (causes InvalidStateError)
-    }
+    // Chad's voice is speechSynthesis now — no analyser possible, the draw
+    // loop uses chadVoice.getAmplitude() instead.
 
     if (!_callMicStream) {
         navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
@@ -591,11 +574,9 @@ function drawCallScreen() {
     var cx = w / 2, cy = h / 2;
     var baseRadius = Math.min(w, h) * 0.2;
 
-    var chadLevel = getAudioLevel(_callAnalyserChad);
+    var chadLevel = (typeof chadVoice !== 'undefined') ? chadVoice.getAmplitude() : 0;
     var micLevel = getAudioLevel(_callAnalyserMic);
-    // Chad is "speaking" if audio is audible OR if the audio queue is still playing
-    var chadQueueActive = (typeof _audioPlaying_queue !== 'undefined') && _audioPlaying_queue;
-    var isChadSpeaking = chadLevel > 0.05 || chadQueueActive;
+    var isChadSpeaking = (typeof chadVoice !== 'undefined') && chadVoice.busy();
     var activeLevel = isChadSpeaking ? Math.max(chadLevel, 0.08) : micLevel;
 
     ctx.clearRect(0, 0, w, h);
@@ -627,28 +608,38 @@ function drawCallScreen() {
         ctx.stroke();
     }
 
-    // Waveform ring
+    // Waveform ring — real analyser data for the mic, synthesized wave for
+    // Chad (speechSynthesis output can't be analysed)
     if (activeLevel > 0.02) {
-        var analyser = isChadSpeaking ? _callAnalyserChad : _callAnalyserMic;
-        if (analyser) {
-            var waveData = new Uint8Array(analyser.frequencyBinCount);
-            analyser.getByteTimeDomainData(waveData);
-            ctx.beginPath();
-            var waveRadius = baseRadius + 6;
-            for (var i = 0; i < waveData.length; i++) {
-                var angle = (i / waveData.length) * Math.PI * 2;
-                var amp = (waveData[i] - 128) / 128;
-                var wr = waveRadius + amp * 25;
+        var waveRadius = baseRadius + 6;
+        ctx.beginPath();
+        if (isChadSpeaking) {
+            var N = 128;
+            for (var i = 0; i < N; i++) {
+                var angle = (i / N) * Math.PI * 2;
+                var amp = Math.sin(angle * 7 + time * 21) * 0.5 + Math.sin(angle * 13 - time * 34) * 0.35;
+                var wr = waveRadius + amp * chadLevel * 25;
                 var wx = cx + Math.cos(angle) * wr;
                 var wy = cy + Math.sin(angle) * wr;
                 if (i === 0) ctx.moveTo(wx, wy); else ctx.lineTo(wx, wy);
             }
-            ctx.closePath();
-            ctx.strokeStyle = isChadSpeaking ? 'rgba(0, 255, 65, 0.6)' : 'rgba(0, 180, 255, 0.5)';
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([]);
-            ctx.stroke();
+        } else if (_callAnalyserMic) {
+            var waveData = new Uint8Array(_callAnalyserMic.frequencyBinCount);
+            _callAnalyserMic.getByteTimeDomainData(waveData);
+            for (var j = 0; j < waveData.length; j++) {
+                var mAngle = (j / waveData.length) * Math.PI * 2;
+                var mAmp = (waveData[j] - 128) / 128;
+                var mr = waveRadius + mAmp * 25;
+                var mx = cx + Math.cos(mAngle) * mr;
+                var my = cy + Math.sin(mAngle) * mr;
+                if (j === 0) ctx.moveTo(mx, my); else ctx.lineTo(mx, my);
+            }
         }
+        ctx.closePath();
+        ctx.strokeStyle = isChadSpeaking ? 'rgba(0, 255, 65, 0.6)' : 'rgba(0, 180, 255, 0.5)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
+        ctx.stroke();
     }
 
     // Avatar — green CRT glitch style (same as main page), clipped to circle
