@@ -42,14 +42,15 @@ var chadAvatar = null;
     // Crop coordinates (set after image loads)
     var cropX = 0, cropY = 0, cropW = 0, cropH = 0;
 
-    // Mouth/jaw region (fraction of rendered area — tuned to chad.jpg crop)
-    // lipY = top of lip line, chinY = bottom of chin, jawW/narrowW = ellipse widths
-    var MOUTH = {
-        cx:    0.53,   // horizontal center of mouth
-        lipY:  0.52,   // y of lip line (split point)
-        chinY: 0.72,   // y of chin bottom
-        jawW:  0.22,   // half-width of jaw at lip line
-        narrowW: 0.10  // half-width at chin tip (tapers)
+    // Mouth geometry measured on chad.jpg itself (fractions of the source
+    // image), mapped through the live crop each frame so the jaw region
+    // hugs his actual face and never overlaps the bright backdrop.
+    var MOUTH_IMG = {
+        cx:       0.582,   // mouth center x
+        lipY:     0.550,   // lip separation line y
+        halfW:    0.032,   // half-width of the lips
+        chinY:    0.670,   // bottom of chin
+        jawHalfW: 0.060    // half-width of jaw at lip level
     };
 
     // Mouse
@@ -296,40 +297,40 @@ var chadAvatar = null;
         ctx.drawImage(edgeImg, 0, 0, cw, ch);
         ctx.restore();
 
-        // --- Mouth animation: elliptical jaw cutout, shift chin down in sync ---
-        if (amp > 0.03 && greenImg) {
-            var lipPx   = ch * MOUTH.lipY;            // y of lip line in px
-            var chinPx  = ch * MOUTH.chinY;           // y of chin bottom
-            var mcx     = cw * MOUTH.cx;              // center x
-            var jawHW   = cw * MOUTH.jawW;            // half-width at lip line
-            var narrowHW = cw * MOUTH.narrowW;        // half-width at chin tip
-            var jawH    = chinPx - lipPx;             // total jaw height
-            var openAmt = amp * 10;                   // pixels of jaw drop
+        // --- Mouth animation: jaw stretches down from the lip line, so the
+        //     region is always covered by its own pixels and never exposes
+        //     blank background ---
+        if (amp > 0.03 && greenImg && cropW > 0) {
+            var iw  = srcImg.width, ih = srcImg.height;
+            var sxf = cw / cropW, syf = ch / cropH;
+            var mcx     = (MOUTH_IMG.cx * iw - cropX) * sxf;
+            var lipPx   = (MOUTH_IMG.lipY * ih - cropY) * syf;
+            var chinPx  = (MOUTH_IMG.chinY * ih - cropY) * syf;
+            var lipHW   = MOUTH_IMG.halfW * iw * sxf;
+            var jawHW   = MOUTH_IMG.jawHalfW * iw * sxf;
+            var narrowHW = jawHW * 0.6;
+            var jawH    = chinPx - lipPx;
+            var openAmt = amp * jawH * 0.18;          // px of jaw drop
 
             ctx.save();
             ctx.translate(cx + ox, cy + oy);
             ctx.scale(breathS, breathS);
             ctx.translate(-cx, -cy);
 
-            // Build an organic jaw/chin clip path (rounded trapezoid)
-            function jawPath(yOffset) {
+            // Organic jaw/chin clip path (rounded trapezoid), bottom extendable
+            function jawPath(extend) {
                 ctx.beginPath();
-                var top  = lipPx + yOffset;
-                var bot  = chinPx + yOffset;
-                var mid  = top + jawH * 0.55;
-                // Start top-left, trace clockwise
+                var top  = lipPx;
+                var bot  = chinPx + extend;
+                var mid  = top + (bot - top) * 0.55;
                 ctx.moveTo(mcx - jawHW, top);
-                // Top edge (straight across mouth)
                 ctx.lineTo(mcx + jawHW, top);
-                // Right side tapers in with a curve
                 ctx.bezierCurveTo(
                     mcx + jawHW,       mid,
                     mcx + narrowHW * 1.3, bot - jawH * 0.15,
                     mcx + narrowHW,    bot
                 );
-                // Chin bottom (rounded)
                 ctx.quadraticCurveTo(mcx, bot + jawH * 0.06, mcx - narrowHW, bot);
-                // Left side tapers in with a curve
                 ctx.bezierCurveTo(
                     mcx - narrowHW * 1.3, bot - jawH * 0.15,
                     mcx - jawHW,       mid,
@@ -338,34 +339,27 @@ var chadAvatar = null;
                 ctx.closePath();
             }
 
-            // 1. Erase the original jaw region (paint black over it)
-            ctx.save();
-            jawPath(0);
-            ctx.clip();
-            ctx.fillStyle = '#050505';
-            ctx.fillRect(0, 0, cw, ch);
-            ctx.restore();
-
-            // 2. Dark mouth slit at the opening gap
-            ctx.fillStyle = 'rgba(5,5,5,' + Math.min(0.9, amp * 1.2).toFixed(2) + ')';
-            ctx.fillRect(mcx - jawHW * 0.8, lipPx - 1, jawHW * 1.6, openAmt + 3);
-
-            // 3. Redraw jaw region shifted down (clipped to jaw shape)
+            // 1. Erase the jaw region plus the drop allowance
             ctx.save();
             jawPath(openAmt);
             ctx.clip();
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, cw, ch);
 
-            // Shift: draw the original lip→chin region at lip+openAmt
+            // 2. Redraw the jaw stretched downward, anchored at the lip line
             ctx.globalAlpha = _brightness * 0.45;
             ctx.drawImage(greenImg,
                 mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
-                mcx - jawHW - 2, lipPx + openAmt, jawHW * 2 + 4, jawH + 4);
+                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4 + openAmt);
             ctx.globalAlpha = _brightness * 0.9;
             ctx.drawImage(edgeImg,
                 mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
-                mcx - jawHW - 2, lipPx + openAmt, jawHW * 2 + 4, jawH + 4);
-
+                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4 + openAmt);
             ctx.restore();
+
+            // 3. Dark mouth slit sized to his actual lips, not the whole jaw
+            ctx.fillStyle = 'rgba(5,5,5,' + Math.min(0.85, amp).toFixed(2) + ')';
+            ctx.fillRect(mcx - lipHW, lipPx - 1, lipHW * 2, openAmt + 2);
 
             ctx.restore();
         }
