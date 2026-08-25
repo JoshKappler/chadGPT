@@ -3,10 +3,11 @@
 // POST { text, voice? } -> audio/mpeg bytes, or 4xx/5xx JSON with the reason
 // GET -> { ok, backend, model, voices } | { ok: false, error }
 //
-// Model eleven_v3 at stability 0 (Creative) mirrors the playground setup
-// Josh approved for Matthew Schmitz - Gravel, Deep Anti-Hero.
+// v3 Conversational at stability 0 (Creative): the same expressive v3
+// family Josh approved for Matthew Schmitz, on the low-latency tier
+// (measured ~40% faster than plain eleven_v3 on the same text).
 
-const EL_MODEL = process.env.CHAD_TTS_MODEL || "eleven_v3";
+const EL_MODEL = process.env.CHAD_TTS_MODEL || "eleven_v3_conversational";
 const EL_VOICE_ID = process.env.CHAD_TTS_VOICE || "bwCXcoVxWNYMlC6Esa8u";
 const EL_SETTINGS = { stability: 0.0 };
 
