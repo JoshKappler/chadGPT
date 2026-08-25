@@ -6,13 +6,14 @@
 const MODEL = process.env.CHAD_TTS_MODEL || "gpt-4o-mini-tts";
 const API_URL = "https://api.openai.com/v1/audio/speech";
 
-const VOICES = ["cedar", "ash", "onyx", "echo", "verse", "marin", "ballad", "alloy", "sage"];
-const DEFAULT_VOICE = "cedar";
+const VOICES = ["ash", "cedar", "onyx", "echo", "verse", "marin", "ballad", "alloy", "sage"];
+const DEFAULT_VOICE = "ash";
 
 const INSTRUCTIONS =
-  "Deep, confident male voice. Smug, dry, condescending delivery: unhurried, " +
-  "faintly amused, like a genius explaining something obvious to someone slow. " +
-  "A smirk should be audible. Never cheerful, never customer-service polite.";
+  "Very deep, gravelly male voice, low-pitched and resonant, with a rough texture. " +
+  "Smug, dry, condescending delivery: unhurried, faintly amused, like a genius " +
+  "explaining something obvious to someone slow. A smirk should be audible. " +
+  "Never cheerful, never customer-service polite.";
 
 const _hits = new Map();
 function rateLimited(ip) {

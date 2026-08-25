@@ -11,6 +11,7 @@ var _callAnimFrame = null;
 var _callAutoMicTimer = null;
 var _callRecognition = null;
 var _callRecognizing = false;
+var _callMicBlocked = false;
 var _callRingTimer = null;
 var _callTranscript = '';
 var _chadImg = null;
@@ -537,13 +538,17 @@ function updateDialDisplay() {
 
 // ---- Call Screen (after dialing) ----
 
+function _callShowMicBlocked() {
+    var el = document.getElementById('call-transcript');
+    if (el) el.textContent = 'MIC BLOCKED - CHECK BROWSER PERMISSIONS';
+}
+
 function setupCallAnalysers() {
     var ctx = _callCtx();
-    // Chad's voice is speechSynthesis now — no analyser possible, the draw
-    // loop uses chadVoice.getAmplitude() instead.
+    // Chad's voice is server TTS through Web Audio; the draw loop reads it via chadVoice
 
     if (!_callMicStream) {
-        navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+        navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }).then(function(stream) {
             _callMicStream = stream;
             _callMicSource = ctx.createMediaStreamSource(stream);
             _callAnalyserMic = ctx.createAnalyser();
@@ -551,6 +556,7 @@ function setupCallAnalysers() {
             _callMicSource.connect(_callAnalyserMic);
         }).catch(function(e) {
             console.warn('[CALL] Mic access denied:', e);
+            _callShowMicBlocked();
         });
     }
 }
@@ -608,20 +614,36 @@ function drawCallScreen() {
         ctx.stroke();
     }
 
-    // Waveform ring — real analyser data for the mic, synthesized wave for
-    // Chad (speechSynthesis output can't be analysed)
+    // Waveform ring: real analyser data for the mic, chadVoice.getBands() for Chad
     if (activeLevel > 0.02) {
         var waveRadius = baseRadius + 6;
         ctx.beginPath();
         if (isChadSpeaking) {
+            var bands = (typeof chadVoice !== 'undefined' && chadVoice.getBands) ? chadVoice.getBands() : [];
             var N = 128;
-            for (var i = 0; i < N; i++) {
-                var angle = (i / N) * Math.PI * 2;
-                var amp = Math.sin(angle * 7 + time * 21) * 0.5 + Math.sin(angle * 13 - time * 34) * 0.35;
-                var wr = waveRadius + amp * chadLevel * 25;
-                var wx = cx + Math.cos(angle) * wr;
-                var wy = cy + Math.sin(angle) * wr;
-                if (i === 0) ctx.moveTo(wx, wy); else ctx.lineTo(wx, wy);
+            if (bands.length > 0) {
+                for (var i = 0; i < N; i++) {
+                    var angle = (i / N) * Math.PI * 2;
+                    // Mirror the bands across the circle so the ring closes smoothly
+                    var t = angle <= Math.PI ? angle / Math.PI : (Math.PI * 2 - angle) / Math.PI;
+                    var pos = t * (bands.length - 1);
+                    var lo = Math.floor(pos);
+                    var hi = Math.min(bands.length - 1, lo + 1);
+                    var band = bands[lo] + (bands[hi] - bands[lo]) * (pos - lo);
+                    var wr = waveRadius + band * 25 * (0.5 + chadLevel);
+                    var wx = cx + Math.cos(angle) * wr;
+                    var wy = cy + Math.sin(angle) * wr;
+                    if (i === 0) ctx.moveTo(wx, wy); else ctx.lineTo(wx, wy);
+                }
+            } else {
+                for (var i = 0; i < N; i++) {
+                    var angle = (i / N) * Math.PI * 2;
+                    var amp = Math.sin(angle * 7 + time * 21) * 0.5 + Math.sin(angle * 13 - time * 34) * 0.35;
+                    var wr = waveRadius + amp * chadLevel * 25;
+                    var wx = cx + Math.cos(angle) * wr;
+                    var wy = cy + Math.sin(angle) * wr;
+                    if (i === 0) ctx.moveTo(wx, wy); else ctx.lineTo(wx, wy);
+                }
             }
         } else if (_callAnalyserMic) {
             var waveData = new Uint8Array(_callAnalyserMic.frequencyBinCount);
@@ -764,7 +786,7 @@ function updateCallTimer() {
 
 function callStartListening() {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) return;
-    if (_callRecognizing || callState !== 'connected') return;
+    if (_callRecognizing || callState !== 'connected' || _callMicBlocked) return;
 
     // Set recognizing immediately so the canvas shows "LISTENING..." without
     // waiting for the async onstart callback (eliminates "YOUR TURN" flicker)
@@ -806,9 +828,20 @@ function callStartListening() {
                 }
             }
         };
-        _callRecognition.onend = function() { _callRecognizing = false; };
+        _callRecognition.onend = function() {
+            _callRecognizing = false;
+            // Fast restart; callCheckAutoMic stays as the safety net
+            if (callState === 'connected' && !_isChadBusy() && !_callMicBlocked) {
+                setTimeout(function() { callStartListening(); }, 150);
+            }
+        };
         _callRecognition.onerror = function(event) {
             _callRecognizing = false;
+            if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+                _callMicBlocked = true;
+                _callShowMicBlocked();
+                return;
+            }
             // Retry on any recoverable error during a call, not just no-speech
             if (callState === 'connected') {
                 var retryDelay = event.error === 'no-speech' ? 500 : 1500;
@@ -843,6 +876,7 @@ function toggleCall() {
 function showDialScreen() {
     callState = 'dialing_screen';
     _dialedDigits = '';
+    _callMicBlocked = false;
 
     var overlay = document.getElementById('call-overlay');
     if (overlay) overlay.style.display = 'flex';

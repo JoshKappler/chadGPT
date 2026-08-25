@@ -42,15 +42,38 @@ var chadAvatar = null;
     // Crop coordinates (set after image loads)
     var cropX = 0, cropY = 0, cropW = 0, cropH = 0;
 
-    // Mouth/jaw region (fraction of rendered area — tuned to chad.jpg crop)
-    // lipY = top of lip line, chinY = bottom of chin, jawW/narrowW = ellipse widths
-    var MOUTH = {
-        cx:    0.53,   // horizontal center of mouth
-        lipY:  0.52,   // y of lip line (split point)
-        chinY: 0.72,   // y of chin bottom
-        jawW:  0.22,   // half-width of jaw at lip line
-        narrowW: 0.10  // half-width at chin tip (tapers)
+    // Mouth geometry measured on chad.jpg itself (fractions of the source
+    // image), mapped through the live crop each frame so it stays glued to
+    // his actual lips at any canvas size.
+    var MOUTH_IMG = {
+        cx:       0.582,   // mouth center x
+        lipY:     0.556,   // lip separation line y
+        halfW:    0.032,   // half-width of the lips
+        lowerLipY: 0.581,  // bottom of lower lip
+        chinY:    0.646,   // bottom of chin
+        jawHalfW: 0.064    // half-width of jaw at lip level
     };
+
+    // Viseme targets driven by wawa-lipsync: open (jaw), width (spread), round (pursing)
+    var VISEME_SHAPES = {
+        viseme_sil: { open: 0.00, width: 0.30, round: 0.20 },
+        viseme_PP:  { open: 0.03, width: 0.30, round: 0.15 },
+        viseme_FF:  { open: 0.15, width: 0.50, round: 0.15 },
+        viseme_TH:  { open: 0.20, width: 0.45, round: 0.20 },
+        viseme_DD:  { open: 0.28, width: 0.50, round: 0.20 },
+        viseme_kk:  { open: 0.30, width: 0.45, round: 0.25 },
+        viseme_CH:  { open: 0.25, width: 0.55, round: 0.35 },
+        viseme_SS:  { open: 0.18, width: 0.60, round: 0.10 },
+        viseme_nn:  { open: 0.15, width: 0.45, round: 0.15 },
+        viseme_RR:  { open: 0.22, width: 0.50, round: 0.40 },
+        viseme_aa:  { open: 0.90, width: 0.60, round: 0.40 },
+        viseme_E:   { open: 0.55, width: 0.80, round: 0.15 },
+        viseme_I:   { open: 0.40, width: 0.75, round: 0.10 },
+        viseme_O:   { open: 0.65, width: 0.45, round: 0.85 },
+        viseme_U:   { open: 0.45, width: 0.30, round: 0.95 }
+    };
+    var _mouth = { open: 0, width: 0.3, round: 0.2 };
+    var MOUTH_DEBUG = /[?&]mouthdebug/.test(location.search);
 
     // Mouse
     var mouseX = 0, mouseY = 0, smoothX = 0, smoothY = 0;
@@ -236,14 +259,28 @@ var chadAvatar = null;
         smoothX += (mouseX - smoothX) * 0.04;
         smoothY += (mouseY - smoothY) * 0.04;
 
-        // Voice amplitude
+        // Voice amplitude, fast attack and slower release
         if (mood === 'talking') {
             var raw = (typeof getVoiceAmplitude === 'function') ? getVoiceAmplitude() : 0;
-            _smoothAmp += (raw - _smoothAmp) * 0.35;
+            _smoothAmp += (raw - _smoothAmp) * (raw > _smoothAmp ? 0.55 : 0.18);
         } else {
-            _smoothAmp *= 0.85;
+            _smoothAmp *= 0.8;
         }
         var amp = _smoothAmp;
+
+        // Viseme-driven mouth state (wawa-lipsync via chadVoice)
+        var vis = (mood === 'talking' && typeof chadVoice !== 'undefined' && chadVoice.getViseme)
+            ? chadVoice.getViseme() : '';
+        var vTarget = VISEME_SHAPES[vis];
+        if (!vTarget) {
+            vTarget = (mood === 'talking' && amp > 0.03)
+                ? { open: Math.min(1, amp * 1.3), width: 0.5, round: 0.3 }
+                : VISEME_SHAPES.viseme_sil;
+        }
+        var openTarget = vis ? vTarget.open * (0.35 + Math.min(1, amp * 1.6) * 0.65) : vTarget.open;
+        _mouth.open  += (openTarget     - _mouth.open)  * 0.45;
+        _mouth.width += (vTarget.width  - _mouth.width) * 0.30;
+        _mouth.round += (vTarget.round  - _mouth.round) * 0.30;
 
         // --- Clear ---
         ctx.fillStyle = '#050505';
@@ -266,8 +303,8 @@ var chadAvatar = null;
             swayY = Math.sin(t * 0.2) * 0.8;
         }
 
-        var speechX = amp * Math.sin(t * 8) * 2;
-        var speechY = amp * Math.sin(t * 12) * 1;
+        var speechX = _mouth.open * Math.sin(t * 5) * 1.5;
+        var speechY = _mouth.open * Math.sin(t * 7) * 1;
         var ox = parallaxX + swayX + speechX;
         var oy = parallaxY + swayY + speechY;
 
@@ -296,40 +333,39 @@ var chadAvatar = null;
         ctx.drawImage(edgeImg, 0, 0, cw, ch);
         ctx.restore();
 
-        // --- Mouth animation: elliptical jaw cutout, shift chin down in sync ---
-        if (amp > 0.03 && greenImg) {
-            var lipPx   = ch * MOUTH.lipY;            // y of lip line in px
-            var chinPx  = ch * MOUTH.chinY;           // y of chin bottom
-            var mcx     = cw * MOUTH.cx;              // center x
-            var jawHW   = cw * MOUTH.jawW;            // half-width at lip line
-            var narrowHW = cw * MOUTH.narrowW;        // half-width at chin tip
-            var jawH    = chinPx - lipPx;             // total jaw height
-            var openAmt = amp * 10;                   // pixels of jaw drop
+        // --- Mouth animation: viseme-shaped opening + jaw drop, mapped from image space ---
+        if ((_mouth.open > 0.015 || MOUTH_DEBUG) && greenImg && cropW > 0) {
+            var iw  = srcImg.width, ih = srcImg.height;
+            var sxf = cw / cropW, syf = ch / cropH;
+            var mcx     = (MOUTH_IMG.cx * iw - cropX) * sxf;
+            var lipPx   = (MOUTH_IMG.lipY * ih - cropY) * syf;
+            var lowLipPx = (MOUTH_IMG.lowerLipY * ih - cropY) * syf;
+            var chinPx  = (MOUTH_IMG.chinY * ih - cropY) * syf;
+            var lipHW   = MOUTH_IMG.halfW * iw * sxf;
+            var jawHW   = MOUTH_IMG.jawHalfW * iw * sxf;
+            var narrowHW = jawHW * 0.6;
+            var jawH    = chinPx - lipPx;
+            var openAmt = _mouth.open * jawH * 0.22;  // px of jaw drop
 
             ctx.save();
             ctx.translate(cx + ox, cy + oy);
             ctx.scale(breathS, breathS);
             ctx.translate(-cx, -cy);
 
-            // Build an organic jaw/chin clip path (rounded trapezoid)
+            // Organic jaw/chin clip path (rounded trapezoid)
             function jawPath(yOffset) {
                 ctx.beginPath();
                 var top  = lipPx + yOffset;
                 var bot  = chinPx + yOffset;
                 var mid  = top + jawH * 0.55;
-                // Start top-left, trace clockwise
                 ctx.moveTo(mcx - jawHW, top);
-                // Top edge (straight across mouth)
                 ctx.lineTo(mcx + jawHW, top);
-                // Right side tapers in with a curve
                 ctx.bezierCurveTo(
                     mcx + jawHW,       mid,
                     mcx + narrowHW * 1.3, bot - jawH * 0.15,
                     mcx + narrowHW,    bot
                 );
-                // Chin bottom (rounded)
                 ctx.quadraticCurveTo(mcx, bot + jawH * 0.06, mcx - narrowHW, bot);
-                // Left side tapers in with a curve
                 ctx.bezierCurveTo(
                     mcx - narrowHW * 1.3, bot - jawH * 0.15,
                     mcx - jawHW,       mid,
@@ -346,16 +382,10 @@ var chadAvatar = null;
             ctx.fillRect(0, 0, cw, ch);
             ctx.restore();
 
-            // 2. Dark mouth slit at the opening gap
-            ctx.fillStyle = 'rgba(5,5,5,' + Math.min(0.9, amp * 1.2).toFixed(2) + ')';
-            ctx.fillRect(mcx - jawHW * 0.8, lipPx - 1, jawHW * 1.6, openAmt + 3);
-
-            // 3. Redraw jaw region shifted down (clipped to jaw shape)
+            // 2. Redraw jaw region shifted down by the jaw drop
             ctx.save();
             jawPath(openAmt);
             ctx.clip();
-
-            // Shift: draw the original lip→chin region at lip+openAmt
             ctx.globalAlpha = _brightness * 0.45;
             ctx.drawImage(greenImg,
                 mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
@@ -364,8 +394,33 @@ var chadAvatar = null;
             ctx.drawImage(edgeImg,
                 mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
                 mcx - jawHW - 2, lipPx + openAmt, jawHW * 2 + 4, jawH + 4);
-
             ctx.restore();
+
+            // 3. Viseme-shaped mouth opening over the exposed gap: width from
+            //    lip spread, height from openness, roundness pulls it circular
+            var mw = lipHW * 2 * (0.75 + _mouth.width * 0.55) * (1 - _mouth.round * 0.35);
+            var mh = Math.max(1.5, _mouth.open * (lowLipPx - lipPx) * 2.2 + openAmt * 0.7);
+            if (_mouth.open > 0.02) {
+                ctx.beginPath();
+                ctx.ellipse(mcx, lipPx + mh * 0.45, mw / 2, mh / 2, 0, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(3,4,3,' + Math.min(0.95, 0.5 + _mouth.open).toFixed(2) + ')';
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(0,255,65,' + (0.35 * _brightness).toFixed(2) + ')';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+
+            // Debug overlay: mouth box, jaw path, current viseme
+            if (MOUTH_DEBUG) {
+                ctx.strokeStyle = '#ff00ff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(mcx - lipHW, lipPx - 4, lipHW * 2, (lowLipPx - lipPx) + 8);
+                jawPath(0);
+                ctx.stroke();
+                ctx.fillStyle = '#ff00ff';
+                ctx.font = '12px monospace';
+                ctx.fillText((vis || 'no-viseme') + ' open=' + _mouth.open.toFixed(2), mcx - 60, lipPx - 12);
+            }
 
             ctx.restore();
         }

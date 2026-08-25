@@ -1,15 +1,16 @@
 // chadVoice, Chad's voice via /api/tts (OpenAI speech, server-side key).
 // Sentences are fetched as mp3 the moment they're queued (so generation
-// overlaps playback), played through Web Audio, with mouth amplitude read
-// from a live analyser. Falls back to browser speechSynthesis if the
+// overlaps playback) and played through a shared <audio> element wired
+// into wawa-lipsync, which yields real-time visemes, band energies and
+// volume for the avatar. Falls back to browser speechSynthesis if the
 // endpoint is missing or errors, so the site never goes mute.
 
 var chadVoice = (function () {
     'use strict';
 
     var VOICES = [
+        { name: 'ash', lang: 'deep, gravelly' },
         { name: 'cedar', lang: 'deep, natural' },
-        { name: 'ash', lang: 'deep, gritty' },
         { name: 'onyx', lang: 'deep, classic' },
         { name: 'echo', lang: 'male' },
         { name: 'verse', lang: 'male' },
@@ -23,9 +24,13 @@ var chadVoice = (function () {
     var fallbackMode = false;  // flipped after a TTS failure, session-sticky
     var _idleHooks = [];
     var _amp = 0;
+    var _viseme = '';
+    var _bands = [];
+    var _rafId = null;
 
-    var ctx = null, analyser = null, gainNode = null, currentSource = null;
-    var _timeData = null;
+    var audioEl = null;
+    var lipsync = null;
+    var _lastUrl = null;
 
     var cfg = {
         voiceName: localStorage.getItem('chad2_voice') || '',
@@ -36,17 +41,18 @@ var chadVoice = (function () {
 
     var synthSupported = ('speechSynthesis' in window) && ('SpeechSynthesisUtterance' in window);
 
-    function ensureCtx() {
-        if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
-        var AC = window.AudioContext || window.webkitAudioContext;
-        if (!AC) { fallbackMode = true; return; }
-        ctx = new AC();
-        gainNode = ctx.createGain();
-        analyser = ctx.createAnalyser();
-        analyser.fftSize = 512;
-        _timeData = new Uint8Array(analyser.fftSize);
-        gainNode.connect(analyser);
-        analyser.connect(ctx.destination);
+    function ensureAudio() {
+        if (audioEl) return true;
+        try {
+            audioEl = new Audio();
+            var W = window['Wawa-lipsync'];
+            if (W && W.Lipsync) lipsync = new W.Lipsync();
+            return true;
+        } catch (e) {
+            console.warn('[chadVoice] audio init failed:', e.message);
+            fallbackMode = true;
+            return false;
+        }
     }
 
     function cleanText(text) {
@@ -65,19 +71,18 @@ var chadVoice = (function () {
             body: JSON.stringify({ text: text, voice: cfg.voiceName || undefined, speed: cfg.rate }),
         }).then(function (r) {
             if (!r.ok) throw new Error('tts ' + r.status);
-            return r.arrayBuffer();
+            return r.blob();
         });
     }
 
     function speak(text) {
         text = cleanText(text);
         if (!text) return;
-        if (fallbackMode || !window.fetch) {
+        if (fallbackMode || !window.fetch || !ensureAudio()) {
             queue.push({ text: text, promise: Promise.resolve(null), abort: null });
             pump();
             return;
         }
-        ensureCtx();
         var abort = new AbortController();
         var item = {
             text: text,
@@ -94,27 +99,50 @@ var chadVoice = (function () {
         pump();
     }
 
+    // Per-frame lipsync analysis while the element plays
+    function analyseLoop() {
+        _rafId = null;
+        if (!playing || !lipsync) return;
+        try {
+            lipsync.processAudio();
+            _viseme = lipsync.viseme || '';
+            var f = lipsync.features;
+            if (f) {
+                _amp = Math.max(_amp * 0.8, Math.min(1, (f.volume || 0) * 3));
+                _bands = f.bands || [];
+            }
+        } catch (e) {}
+        _rafId = requestAnimationFrame(analyseLoop);
+    }
+
     function pump() {
         if (playing) return;
         if (queue.length === 0) { fireIdle(); return; }
         playing = true;
         var item = queue.shift();
         var gen = generation;
-        item.promise.then(function (buf) {
+        item.promise.then(function (blob) {
             if (gen !== generation) return;
-            if (!buf || !ctx) { speakFallback(item.text, gen); return; }
-            ctx.decodeAudioData(buf.slice(0), function (audio) {
+            if (!blob || !audioEl) { speakFallback(item.text, gen); return; }
+            if (_lastUrl) { URL.revokeObjectURL(_lastUrl); _lastUrl = null; }
+            _lastUrl = URL.createObjectURL(blob);
+            audioEl.src = _lastUrl;
+            audioEl.volume = cfg.volume;
+            if (Math.abs(cfg.pitch - 1.0) > 0.01) {
+                audioEl.preservesPitch = false;
+                audioEl.playbackRate = cfg.pitch;
+            } else {
+                audioEl.preservesPitch = true;
+                audioEl.playbackRate = 1.0;
+            }
+            audioEl.onended = function () { if (gen === generation) done(); };
+            audioEl.onerror = function () { if (gen === generation) done(); };
+            try { if (lipsync) lipsync.connectAudio(audioEl); } catch (e) { lipsync = null; }
+            audioEl.play().then(function () {
                 if (gen !== generation) return;
-                var src = ctx.createBufferSource();
-                src.buffer = audio;
-                src.playbackRate.value = cfg.pitch;
-                gainNode.gain.value = cfg.volume;
-                src.connect(gainNode);
-                src.onended = function () { if (gen === generation) done(); };
-                currentSource = src;
                 if (typeof chadAvatar !== 'undefined' && chadAvatar) chadAvatar.startTalking();
-                src.start();
-            }, function () {
+                if (lipsync && !_rafId) _rafId = requestAnimationFrame(analyseLoop);
+            }).catch(function () {
                 if (gen === generation) speakFallback(item.text, gen);
             });
         });
@@ -122,8 +150,9 @@ var chadVoice = (function () {
 
     function done() {
         playing = false;
-        currentSource = null;
         _amp = 0;
+        _viseme = '';
+        _bands = [];
         pump();
     }
 
@@ -160,10 +189,15 @@ var chadVoice = (function () {
             if (queue[i].abort) { try { queue[i].abort.abort(); } catch (e) {} }
         }
         queue = [];
-        if (currentSource) { try { currentSource.stop(); } catch (e) {} currentSource = null; }
+        if (audioEl) {
+            try { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); } catch (e) {}
+        }
+        if (_lastUrl) { URL.revokeObjectURL(_lastUrl); _lastUrl = null; }
         if (synthSupported) speechSynthesis.cancel();
         playing = false;
         _amp = 0;
+        _viseme = '';
+        _bands = [];
         fireIdle();
     }
 
@@ -172,25 +206,30 @@ var chadVoice = (function () {
             (synthSupported && (speechSynthesis.speaking || speechSynthesis.pending));
     }
 
-    // Real amplitude from the analyser; simulated flutter on the fallback path.
     function getAmplitude() {
         if (!busy()) return 0;
-        if (currentSource && analyser) {
-            analyser.getByteTimeDomainData(_timeData);
-            var sum = 0;
-            for (var i = 0; i < _timeData.length; i++) {
-                var d = (_timeData[i] - 128) / 128;
-                sum += d * d;
-            }
-            var rms = Math.sqrt(sum / _timeData.length);
-            _amp = Math.max(_amp * 0.85, Math.min(1, rms * 4));
-            return _amp;
-        }
+        if (playing && lipsync && _viseme) return _amp;
         if (!playing) return 0;
+        // Fallback path has no analyser: simulated flutter keeps the mouth moving
         var t = Date.now() / 1000;
         var flutter = 0.3 + 0.25 * Math.abs(Math.sin(t * 9)) + 0.15 * Math.abs(Math.sin(t * 23));
         _amp = Math.max(_amp * 0.92, flutter * 0.8);
         return Math.min(1, _amp);
+    }
+
+    // Current viseme string ('viseme_aa', 'viseme_PP', ...) or '' when unknown
+    function getViseme() {
+        return (playing && lipsync) ? _viseme : '';
+    }
+
+    // Frequency band energies (roughly 0..1) or [] when unavailable
+    function getBands() {
+        if (!playing || !lipsync || !_bands.length) return [];
+        var out = new Array(_bands.length);
+        for (var i = 0; i < _bands.length; i++) {
+            out[i] = Math.min(1, Math.max(0, _bands[i] * 2.5));
+        }
+        return out;
     }
 
     function setConfig(patch) {
@@ -211,6 +250,8 @@ var chadVoice = (function () {
         stop: stop,
         busy: busy,
         getAmplitude: getAmplitude,
+        getViseme: getViseme,
+        getBands: getBands,
         setConfig: setConfig,
         getConfig: function () { return { voiceName: cfg.voiceName, pitch: cfg.pitch, rate: cfg.rate, volume: cfg.volume }; },
         voices: function () { return VOICES; },
