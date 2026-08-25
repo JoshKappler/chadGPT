@@ -43,12 +43,11 @@ var chadAvatar = null;
     var cropX = 0, cropY = 0, cropW = 0, cropH = 0;
 
     // Mouth geometry measured on chad.jpg itself (fractions of the source
-    // image), mapped through the live crop each frame so the jaw region
+    // image), mapped through the live crop each frame so the warp region
     // hugs his actual face and never overlaps the bright backdrop.
     var MOUTH_IMG = {
         cx:       0.582,   // mouth center x
         lipY:     0.550,   // lip separation line y
-        halfW:    0.032,   // half-width of the lips
         chinY:    0.670,   // bottom of chin
         jawHalfW: 0.060    // half-width of jaw at lip level
     };
@@ -297,70 +296,52 @@ var chadAvatar = null;
         ctx.drawImage(edgeImg, 0, 0, cw, ch);
         ctx.restore();
 
-        // --- Mouth animation: jaw stretches down from the lip line, so the
-        //     region is always covered by its own pixels and never exposes
-        //     blank background ---
+        // --- Mouth animation: bend the jaw area instead of cutting and
+        //     moving it. Vertical columns stretch down by a smooth falloff
+        //     that peaks at the mouth center and hits zero at the region
+        //     edges, then re-compress below so every side rejoins its
+        //     surroundings exactly: no cutout, no slit, no straight edges ---
         if (amp > 0.03 && greenImg && cropW > 0) {
             var iw  = srcImg.width, ih = srcImg.height;
             var sxf = cw / cropW, syf = ch / cropH;
-            var mcx     = (MOUTH_IMG.cx * iw - cropX) * sxf;
-            var lipPx   = (MOUTH_IMG.lipY * ih - cropY) * syf;
-            var chinPx  = (MOUTH_IMG.chinY * ih - cropY) * syf;
-            var lipHW   = MOUTH_IMG.halfW * iw * sxf;
-            var jawHW   = MOUTH_IMG.jawHalfW * iw * sxf;
-            var narrowHW = jawHW * 0.6;
-            var jawH    = chinPx - lipPx;
-            var openAmt = amp * jawH * 0.18;          // px of jaw drop
+            var mcx    = (MOUTH_IMG.cx * iw - cropX) * sxf;
+            var lipPx  = (MOUTH_IMG.lipY * ih - cropY) * syf;
+            var chinPx = (MOUTH_IMG.chinY * ih - cropY) * syf;
+            var jawHW  = MOUTH_IMG.jawHalfW * iw * sxf;
+            var jawH   = chinPx - lipPx;
+            var regionHW = jawHW * 1.35;       // falloff reaches zero here
+            var topY   = lipPx;
+            var midY   = lipPx + jawH * 0.45;  // bulge peak
+            var botY   = chinPx + jawH * 0.35; // warp fades out by here
+            var drop   = amp * jawH * 0.16;    // max downward bend
 
             ctx.save();
             ctx.translate(cx + ox, cy + oy);
             ctx.scale(breathS, breathS);
             ctx.translate(-cx, -cy);
 
-            // Organic jaw/chin clip path (rounded trapezoid), bottom extendable
-            function jawPath(extend) {
-                ctx.beginPath();
-                var top  = lipPx;
-                var bot  = chinPx + extend;
-                var mid  = top + (bot - top) * 0.55;
-                ctx.moveTo(mcx - jawHW, top);
-                ctx.lineTo(mcx + jawHW, top);
-                ctx.bezierCurveTo(
-                    mcx + jawHW,       mid,
-                    mcx + narrowHW * 1.3, bot - jawH * 0.15,
-                    mcx + narrowHW,    bot
-                );
-                ctx.quadraticCurveTo(mcx, bot + jawH * 0.06, mcx - narrowHW, bot);
-                ctx.bezierCurveTo(
-                    mcx - narrowHW * 1.3, bot - jawH * 0.15,
-                    mcx - jawHW,       mid,
-                    mcx - jawHW,       top
-                );
-                ctx.closePath();
-            }
-
-            // 1. Erase the jaw region plus the drop allowance
-            ctx.save();
-            jawPath(openAmt);
-            ctx.clip();
+            // Repaint the region from scratch so the layer alphas don't stack
+            var rx = mcx - regionHW, rw = regionHW * 2;
             ctx.fillStyle = '#050505';
-            ctx.fillRect(0, 0, cw, ch);
+            ctx.fillRect(rx, topY, rw, botY - topY);
 
-            // 2. Redraw the jaw stretched downward, anchored at the lip line
-            ctx.globalAlpha = _brightness * 0.45;
-            ctx.drawImage(greenImg,
-                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
-                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4 + openAmt);
-            ctx.globalAlpha = _brightness * 0.9;
-            ctx.drawImage(edgeImg,
-                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
-                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4 + openAmt);
-            ctx.restore();
-
-            // 3. Dark mouth slit sized to his actual lips, not the whole jaw
-            ctx.fillStyle = 'rgba(5,5,5,' + Math.min(0.85, amp).toFixed(2) + ')';
-            ctx.fillRect(mcx - lipHW, lipPx - 1, lipHW * 2, openAmt + 2);
-
+            var STRIPS = 26;
+            var sw = rw / STRIPS;
+            for (var si = 0; si < STRIPS; si++) {
+                var sx0 = rx + si * sw;
+                var tf  = Math.min(1, Math.abs(((sx0 + sw / 2) - mcx) / regionHW));
+                var env = Math.cos(tf * Math.PI / 2);
+                var dy  = drop * env * env;
+                for (var layer = 0; layer < 2; layer++) {
+                    var img = layer === 0 ? greenImg : edgeImg;
+                    ctx.globalAlpha = _brightness * (layer === 0 ? 0.45 : 0.9);
+                    ctx.drawImage(img, sx0, topY, sw, midY - topY,
+                                       sx0, topY, sw, midY - topY + dy);
+                    ctx.drawImage(img, sx0, midY, sw, botY - midY,
+                                       sx0, midY + dy, sw, botY - midY - dy);
+                }
+            }
+            ctx.globalAlpha = 1;
             ctx.restore();
         }
 
