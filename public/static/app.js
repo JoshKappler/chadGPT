@@ -1132,7 +1132,7 @@ function toggleSettings() {
     staticEffect.spike(0.12, 150);
 }
 
-// Voice settings — browser speechSynthesis, persisted in localStorage by chadVoice
+// Voice settings, persisted in localStorage by chadVoice
 function populateVoiceList() {
     const select = document.getElementById('voice-select');
     if (!select || typeof chadVoice === 'undefined') return;
