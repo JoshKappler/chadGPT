@@ -26,7 +26,8 @@ var chadVoice = (function () {
     var queue = [];            // { text, promise, abort }
     var playing = false;
     var generation = 0;        // bumped on stop() so stale callbacks are ignored
-    var fallbackMode = false;  // flipped after a TTS failure, session-sticky
+    var fallbackMode = false;  // capability flag: no Audio/AudioContext at all
+    var _ttsFailedAt = 0;      // last endpoint failure; retried after a cooldown
     var _idleHooks = [];
     var _amp = 0;
     var _viseme = '';
@@ -83,7 +84,7 @@ var chadVoice = (function () {
     function speak(text) {
         text = cleanText(text);
         if (!text) return;
-        if (fallbackMode || !window.fetch || !ensureAudio()) {
+        if (fallbackMode || (Date.now() - _ttsFailedAt < 30000) || !window.fetch || !ensureAudio()) {
             queue.push({ text: text, promise: Promise.resolve(null), abort: null });
             pump();
             return;
@@ -94,8 +95,8 @@ var chadVoice = (function () {
             abort: abort,
             promise: fetchTTS(text, abort).catch(function (e) {
                 if (e.name !== 'AbortError') {
-                    console.warn('[chadVoice] TTS failed, falling back to speechSynthesis:', e.message);
-                    fallbackMode = true;
+                    console.warn('[chadVoice] TTS failed, retrying endpoint in 30s:', e.message);
+                    _ttsFailedAt = Date.now();
                 }
                 return null;
             }),
