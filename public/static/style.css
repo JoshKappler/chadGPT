@@ -442,6 +442,10 @@ body {
 .boot-line.header {
     color: var(--green);
     text-shadow: 0 0 6px var(--green);
+    /* Share Tech Mono lacks box-drawing and block glyphs; without a
+       consistent fallback the banner columns shear into a blob */
+    font-family: 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace;
+    white-space: pre;
 }
 
 @keyframes fadeInLine {
