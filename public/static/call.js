@@ -227,6 +227,7 @@ function getDigitFromPosition(canvas, x, y) {
 }
 
 function drawRotaryDial(canvas) {
+    if (!canvas.offsetWidth || !canvas.offsetHeight) return; // hidden overlay
     var ctx = canvas.getContext('2d');
     var dpr = window.devicePixelRatio || 2;
     var w = canvas.width = canvas.offsetWidth * dpr;
