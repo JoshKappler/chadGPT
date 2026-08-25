@@ -625,12 +625,10 @@ function stopMetricsTicker() {
 
 // ============ CHAT ============
 
-// Sentence splitter for streaming TTS — same rule the old server used:
-// punctuation followed by whitespace means the sentence is truly done.
-const SENTENCE_SPLIT = /(?<=[.!?])\s+/;
-
 // Stream Chad's reply from /api/chat, appending tokens to the current
-// response bubble and speaking each sentence as it completes.
+// response bubble and speaking the whole reply as ONE synthesis when the
+// stream ends: per-sentence requests made Eleven v3 Creative render each
+// sentence as a different take, which sounded like the voice switching.
 // Returns the full response text ('' on failure).
 async function streamChat(payload, { speakSentences = true } = {}) {
     _chatAbort = new AbortController();
@@ -639,7 +637,6 @@ async function streamChat(payload, { speakSentences = true } = {}) {
     let watchdog = setTimeout(() => abort.abort(), 45000);
     const t0 = performance.now();
     let full = '';
-    let sentenceBuffer = '';
     try {
         const resp = await fetch('/api/chat', {
             method: 'POST',
@@ -665,19 +662,9 @@ async function streamChat(payload, { speakSentences = true } = {}) {
             full += text;
             appendToCurrentResponse(text);
             if (Math.random() > 0.85) staticEffect.spike(0.04, 60);
-            if (speakSentences) {
-                sentenceBuffer += text;
-                const parts = sentenceBuffer.split(SENTENCE_SPLIT);
-                if (parts.length > 1) {
-                    for (const sent of parts.slice(0, -1)) {
-                        if (sent.trim().length >= 4) chadVoice.speak(sent.trim());
-                    }
-                    sentenceBuffer = parts[parts.length - 1];
-                }
-            }
         }
-        if (speakSentences && sentenceBuffer.trim().length >= 2) {
-            chadVoice.speak(sentenceBuffer.trim());
+        if (speakSentences && full.trim().length >= 2) {
+            chadVoice.speak(full.trim());
         }
         _lastLatencyMs = Math.round(performance.now() - t0);
     } catch (e) {

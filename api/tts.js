@@ -66,7 +66,7 @@ export default async function handler(req, res) {
   }
 
   const body = req.body || {};
-  const text = String(body.text == null ? "" : body.text).slice(0, 600).trim();
+  const text = String(body.text == null ? "" : body.text).slice(0, 900).trim();
   if (!text) return res.status(400).json({ error: "No text" });
 
   // Default voice is a known id; a named pick from the dropdown is resolved
