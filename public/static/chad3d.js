@@ -381,31 +381,33 @@ var chadAvatar = null;
             ctx.fillStyle = '#050505';
             ctx.fillRect(0, 0, cw, ch);
 
-            // 2. Redraw the jaw stretched downward, anchored at the lip line,
-            //    so the chin drops without exposing a gap band
+            // 2. Real-pixel mouth: the lip strip stretches open while the
+            //    chin below drops rigidly; every pixel is his actual face
+            var stripH = Math.max(2, lowLipPx - lipPx);
+            var srcX = mcx - jawHW - 2, srcW = jawHW * 2 + 4;
+            var chinH = chinPx - lowLipPx + 4;
             ctx.globalAlpha = _brightness * 0.45;
-            ctx.drawImage(greenImg,
-                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
-                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4 + openAmt);
+            ctx.drawImage(greenImg, srcX, lipPx, srcW, stripH,
+                          srcX, lipPx, srcW, stripH + openAmt);
+            ctx.drawImage(greenImg, srcX, lowLipPx, srcW, chinH,
+                          srcX, lowLipPx + openAmt, srcW, chinH);
             ctx.globalAlpha = _brightness * 0.9;
-            ctx.drawImage(edgeImg,
-                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4,
-                mcx - jawHW - 2, lipPx, jawHW * 2 + 4, jawH + 4 + openAmt);
-            ctx.restore();
+            ctx.drawImage(edgeImg, srcX, lipPx, srcW, stripH,
+                          srcX, lipPx, srcW, stripH + openAmt);
+            ctx.drawImage(edgeImg, srcX, lowLipPx, srcW, chinH,
+                          srcX, lowLipPx + openAmt, srcW, chinH);
 
-            // 3. Viseme-shaped mouth opening: width from lip spread, height
-            //    from openness, roundness pulls it circular
-            var mw = lipHW * 2 * (0.68 + _mouth.width * 0.5) * (1 - _mouth.round * 0.35);
-            var mh = Math.max(1.5, _mouth.open * (lowLipPx - lipPx) * 2.2 + openAmt * 0.7);
-            if (_mouth.open > 0.02) {
-                ctx.beginPath();
-                ctx.ellipse(mcx, lipPx + mh * 0.42, mw / 2, mh / 2, 0, 0, Math.PI * 2);
-                ctx.fillStyle = 'rgba(3,4,3,' + Math.min(0.95, 0.5 + _mouth.open).toFixed(2) + ')';
-                ctx.fill();
-                ctx.strokeStyle = 'rgba(0,255,65,' + (0.35 * _brightness).toFixed(2) + ')';
-                ctx.lineWidth = 1;
-                ctx.stroke();
+            // Feathered interior shadow while open; no drawn outline
+            if (_mouth.open > 0.05) {
+                var sy0 = lipPx + (stripH + openAmt) * 0.5;
+                var sr = lipHW * (1.1 + _mouth.width * 0.3);
+                var grad = ctx.createRadialGradient(mcx, sy0, sr * 0.15, mcx, sy0, sr);
+                grad.addColorStop(0, 'rgba(0,0,0,' + (0.5 * _mouth.open).toFixed(2) + ')');
+                grad.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(srcX, lipPx, srcW, stripH + openAmt);
             }
+            ctx.restore();
 
             // Debug overlay: mouth box, jaw path, current viseme
             if (MOUTH_DEBUG) {

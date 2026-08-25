@@ -8,15 +8,20 @@
 var chadVoice = (function () {
     'use strict';
 
+    // Fallback list; the live list comes from GET /api/tts (backend-dependent)
     var VOICES = [
-        { name: 'ash', lang: 'deep, gravelly' },
-        { name: 'cedar', lang: 'deep, natural' },
-        { name: 'onyx', lang: 'deep, classic' },
-        { name: 'echo', lang: 'male' },
-        { name: 'verse', lang: 'male' },
-        { name: 'marin', lang: 'natural' },
-        { name: 'ballad', lang: 'smooth' },
+        { name: 'ash', lang: 'neural' },
+        { name: 'cedar', lang: 'neural' },
+        { name: 'onyx', lang: 'neural' },
     ];
+    if (window.fetch) {
+        fetch('/api/tts').then(function (r) { return r.json(); }).then(function (j) {
+            if (j && j.voices && j.voices.length) {
+                VOICES = j.voices;
+                if (typeof populateVoiceList === 'function') populateVoiceList();
+            }
+        }).catch(function () {});
+    }
 
     var queue = [];            // { text, promise, abort }
     var playing = false;

@@ -1,19 +1,46 @@
-// ChadGPT voice endpoint, streams speech from the OpenAI Audio API.
+// ChadGPT voice endpoint. Primary backend: ElevenLabs (gravelly, chaotic
+// settings) when ELEVENLABS_API_KEY is set; falls back to OpenAI speech.
 //
 // POST { text, voice?, speed? } -> audio/mpeg bytes
-// GET -> { ok, voices }  (used by the settings panel and the boot screen)
+// GET -> { ok, backend, voices }  (settings panel + boot screen)
 
-const MODEL = process.env.CHAD_TTS_MODEL || "gpt-4o-mini-tts";
-const API_URL = "https://api.openai.com/v1/audio/speech";
+const EL_MODEL = process.env.CHAD_TTS_MODEL || "eleven_turbo_v2_5";
+const EL_VOICE = process.env.CHAD_TTS_VOICE || "Clyde";
+const EL_SETTINGS = {
+  stability: 0.3,        // low = unhinged delivery
+  similarity_boost: 0.8,
+  style: 0.65,           // high = exaggerated character
+  use_speaker_boost: true,
+};
 
-const VOICES = ["ash", "cedar", "onyx", "echo", "verse", "marin", "ballad", "alloy", "sage"];
-const DEFAULT_VOICE = "ash";
-
-const INSTRUCTIONS =
+const OPENAI_MODEL = "gpt-4o-mini-tts";
+const OPENAI_VOICES = ["ash", "cedar", "onyx", "echo", "verse", "marin", "ballad", "alloy", "sage"];
+const OPENAI_INSTRUCTIONS =
   "Very deep, gravelly male voice, low-pitched and resonant, with a rough texture. " +
   "Smug, dry, condescending delivery: unhurried, faintly amused, like a genius " +
   "explaining something obvious to someone slow. A smirk should be audible. " +
   "Never cheerful, never customer-service polite.";
+
+let _elVoices = null; // [{name, id}], cached per instance
+
+async function elVoiceList() {
+  if (_elVoices) return _elVoices;
+  const r = await fetch("https://api.elevenlabs.io/v1/voices", {
+    headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY },
+  });
+  if (!r.ok) return [];
+  const j = await r.json().catch(() => null);
+  _elVoices = (j && j.voices ? j.voices : []).map((v) => ({ name: v.name, id: v.voice_id }));
+  return _elVoices;
+}
+
+async function elResolveVoice(name) {
+  const list = await elVoiceList();
+  const hit = list.find((v) => v.name.toLowerCase() === String(name).toLowerCase());
+  if (hit) return hit.id;
+  const dflt = list.find((v) => v.name.toLowerCase() === EL_VOICE.toLowerCase());
+  return dflt ? dflt.id : (list[0] && list[0].id);
+}
 
 const _hits = new Map();
 function rateLimited(ip) {
@@ -26,54 +53,14 @@ function rateLimited(ip) {
   return arr.length > 40;
 }
 
-export default async function handler(req, res) {
-  if (req.method === "GET") {
-    return res.status(200).json({ ok: !!process.env.OPENAI_API_KEY, voices: VOICES });
-  }
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "POST only" });
-  }
-  const ip = (req.headers["x-forwarded-for"] || "?").split(",")[0].trim();
-  if (rateLimited(ip)) {
-    return res.status(429).json({ error: "Chad's voice needs a breather. Slow down." });
-  }
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(503).json({ error: "OPENAI_API_KEY not configured" });
-  }
-
-  const body = req.body || {};
-  const text = String(body.text == null ? "" : body.text).slice(0, 600).trim();
-  if (!text) return res.status(400).json({ error: "No text" });
-  const voice = VOICES.includes(body.voice) ? body.voice : DEFAULT_VOICE;
-  let speed = Number(body.speed) || 1.0;
-  speed = Math.min(1.5, Math.max(0.5, speed));
-
-  const upstream = await fetch(API_URL, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      voice,
-      input: text,
-      instructions: INSTRUCTIONS,
-      response_format: "mp3",
-      speed,
-    }),
-  });
-
+async function pipeAudio(upstream, res) {
   if (!upstream.ok) {
     const detail = await upstream.text().catch(() => "");
-    console.error("openai tts error", upstream.status, detail.slice(0, 500));
-    return res.status(502).json({ error: "Chad's voice box is offline." });
+    console.error("tts upstream error", upstream.status, detail.slice(0, 500));
+    res.status(502).json({ error: "Chad's voice box is offline." });
+    return;
   }
-
-  res.writeHead(200, {
-    "Content-Type": "audio/mpeg",
-    "Cache-Control": "no-store",
-  });
+  res.writeHead(200, { "Content-Type": "audio/mpeg", "Cache-Control": "no-store" });
   try {
     for await (const chunk of upstream.body) {
       res.write(Buffer.from(chunk));
@@ -82,4 +69,76 @@ export default async function handler(req, res) {
     console.error("tts stream aborted", e.message);
   }
   res.end();
+}
+
+export default async function handler(req, res) {
+  const elKey = process.env.ELEVENLABS_API_KEY;
+  const oaKey = process.env.OPENAI_API_KEY;
+
+  if (req.method === "GET") {
+    if (elKey) {
+      const voices = await elVoiceList().catch(() => []);
+      return res.status(200).json({ ok: true, backend: "elevenlabs", voices: voices.map((v) => ({ name: v.name, lang: "neural" })) });
+    }
+    if (oaKey) {
+      return res.status(200).json({ ok: true, backend: "openai", voices: OPENAI_VOICES.map((n) => ({ name: n, lang: "neural" })) });
+    }
+    return res.status(200).json({ ok: false, backend: null, voices: [] });
+  }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "POST only" });
+  }
+  const ip = (req.headers["x-forwarded-for"] || "?").split(",")[0].trim();
+  if (rateLimited(ip)) {
+    return res.status(429).json({ error: "Chad's voice needs a breather. Slow down." });
+  }
+  if (!elKey && !oaKey) {
+    return res.status(503).json({ error: "No TTS key configured" });
+  }
+
+  const body = req.body || {};
+  const text = String(body.text == null ? "" : body.text).slice(0, 600).trim();
+  if (!text) return res.status(400).json({ error: "No text" });
+  let speed = Number(body.speed) || 1.0;
+  speed = Math.min(1.5, Math.max(0.5, speed));
+
+  if (elKey) {
+    const voiceId = await elResolveVoice(body.voice || EL_VOICE).catch(() => null);
+    if (voiceId) {
+      const upstream = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=mp3_44100_128`,
+        {
+          method: "POST",
+          headers: { "xi-api-key": elKey, "content-type": "application/json" },
+          body: JSON.stringify({
+            text,
+            model_id: EL_MODEL,
+            voice_settings: EL_SETTINGS,
+          }),
+        }
+      );
+      if (upstream.ok) return pipeAudio(upstream, res);
+      const detail = await upstream.text().catch(() => "");
+      console.error("elevenlabs error, falling back", upstream.status, detail.slice(0, 300));
+    }
+  }
+
+  if (!oaKey) return res.status(502).json({ error: "Chad's voice box is offline." });
+  const voice = OPENAI_VOICES.includes(body.voice) ? body.voice : "ash";
+  const upstream = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${oaKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      voice,
+      input: text,
+      instructions: OPENAI_INSTRUCTIONS,
+      response_format: "mp3",
+      speed,
+    }),
+  });
+  return pipeAudio(upstream, res);
 }
