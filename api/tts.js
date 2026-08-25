@@ -4,15 +4,12 @@
 // POST { text, voice?, speed? } -> audio/mpeg bytes
 // GET -> { ok, backend, voices }  (settings panel + boot screen)
 
-const EL_MODEL = process.env.CHAD_TTS_MODEL || "eleven_turbo_v2_5";
-// Josh's pick from the ElevenLabs voice library (must be added to My Voices)
+// Multilingual v2: highest similarity for professional voice clones.
+// No voice_settings override: the API then uses the voice's own stored
+// settings, which is what the website preview plays.
+const EL_MODEL = process.env.CHAD_TTS_MODEL || "eleven_multilingual_v2";
+// Josh's pick from the ElevenLabs voice library
 const EL_VOICE = process.env.CHAD_TTS_VOICE || "bwCXcoVxWNYMlC6Esa8u";
-const EL_SETTINGS = {
-  stability: 0.3,        // low = unhinged delivery
-  similarity_boost: 0.8,
-  style: 0.65,           // high = exaggerated character
-  use_speaker_boost: true,
-};
 
 const OPENAI_MODEL = "gpt-4o-mini-tts";
 const OPENAI_VOICES = ["ash", "cedar", "onyx", "echo", "verse", "marin", "ballad", "alloy", "sage"];
@@ -114,7 +111,6 @@ export default async function handler(req, res) {
           body: JSON.stringify({
             text,
             model_id: EL_MODEL,
-            voice_settings: EL_SETTINGS,
           }),
         }
       );
